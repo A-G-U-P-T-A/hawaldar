@@ -2,25 +2,14 @@
 
 ## Status
 
-Accepted
+Superseded by [0009](0009-pyside-agents-sdk.md)
 
 ## Context
 
-Hawaldar needs a single local application that will grow into a runtime, CLI, Theia workbench, and several domain packages. The operator machine is Windows with Node 24 and npm 11. Corepack could not enable pnpm (EPERM on `C:\Program Files\nodejs`).
+Hawaldar started as a TypeScript monorepo (runtime, Theia, Mastra). That stack grew into multiple HTTP servers and a Chromium window.
 
 ## Decision
 
-- One git repository with npm workspaces (`apps/*`, `packages/*`, `tools/*`).
-- TypeScript for application and orchestration code.
-- Rust only if a later sandbox/OS boundary genuinely requires it.
-- Structured logging via Pino.
-- Configuration from environment variables, validated in `@hawaldar/shared`.
-- SQLite + Drizzle for engagement state.
-- Podman later; Docker is never a dependency.
-- Product scope is authorized reconnaissance, not exploitation.
+Historical: npm workspaces, TypeScript, SQLite, Podman, recon-only product.
 
-## Consequences
-
-- CLI and Theia will import the same packages; no duplicate business logic.
-- Lockfile is `package-lock.json`.
-- Packages are added when a phase needs them, not as empty stubs.
+Current stack is Python: PySide6 + OpenAI Agents SDK. Product constraints from 0002–0005 still hold.
