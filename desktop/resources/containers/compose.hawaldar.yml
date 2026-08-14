@@ -1,0 +1,67 @@
+# Hawaldar container catalog — documentation / image+mount config only.
+#
+# Do NOT `podman-compose up -d` or `docker compose up -d` this file.
+# Hawaldar runs each allowed tool with `podman run --rm` (or `docker run --rm`)
+# when a tool is called. Images use 0 RAM until then. restart: "no".
+#
+# Metasploit / msfrpcd / stealth nmap / OS detection / host shells /
+# credential dump / SQLMap are not shipped and must not be added here.
+#
+# Shared workspace: host ~/.hawaldar/workspace → /workspace (read-write).
+# Same folder in every tool container — no file copying between tools.
+
+name: hawaldar
+
+networks:
+  tool:
+    # Unused at runtime. Each ephemeral run picks slirp4netns/bridge or none.
+
+x-workspace: &workspace
+  volumes:
+    - ${HAWALDAR_WORKSPACE_HOST:-~/.hawaldar/workspace}:/workspace
+  working_dir: /workspace
+  environment:
+    HAWALDAR_WORKSPACE: /workspace
+  restart: "no"
+  profiles: ["catalog"]
+
+services:
+  nmap:
+    <<: *workspace
+    image: localhost/hawaldar/nmap:min
+  tshark:
+    <<: *workspace
+    image: localhost/hawaldar/tshark:min
+  ghidra:
+    <<: *workspace
+    image: localhost/hawaldar/ghidra:min
+  radare:
+    <<: *workspace
+    image: localhost/hawaldar/radare:min
+  binwalk:
+    <<: *workspace
+    image: localhost/hawaldar/binwalk:min
+  subfinder:
+    <<: *workspace
+    image: localhost/hawaldar/subfinder:min
+  dnsx:
+    <<: *workspace
+    image: localhost/hawaldar/dnsx:min
+  httpx:
+    <<: *workspace
+    image: localhost/hawaldar/httpx:min
+  naabu:
+    <<: *workspace
+    image: localhost/hawaldar/naabu:min
+  katana:
+    <<: *workspace
+    image: localhost/hawaldar/katana:min
+  nuclei:
+    <<: *workspace
+    image: localhost/hawaldar/nuclei:min
+  amass:
+    <<: *workspace
+    image: localhost/hawaldar/amass:min
+  ffuf:
+    <<: *workspace
+    image: localhost/hawaldar/ffuf:min

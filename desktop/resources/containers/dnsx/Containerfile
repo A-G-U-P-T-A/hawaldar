@@ -1,0 +1,11 @@
+ARG VERSION=1.2.1
+FROM docker.io/library/alpine:3.20 AS down
+ARG VERSION
+RUN apk add --no-cache curl ca-certificates unzip \
+	&& curl -fsSL "https://github.com/projectdiscovery/dnsx/releases/download/v${VERSION}/dnsx_${VERSION}_linux_amd64.zip" -o /tmp/t.zip \
+	&& unzip -j /tmp/t.zip dnsx -d /usr/local/bin \
+	&& chmod +x /usr/local/bin/dnsx
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates && rm -rf /var/cache/apk/*
+COPY --from=down /usr/local/bin/dnsx /usr/local/bin/dnsx
+ENTRYPOINT ["dnsx"]

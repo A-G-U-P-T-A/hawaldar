@@ -1,39 +1,27 @@
 # Hawaldar
 
-Authorized reconnaissance workstation: a **VS Code fork** with a built-in Mastra runtime. Policy is the authority on scope. Tools run only in Podman.
+Authorized reconnaissance workstation. Policy is the authority on scope. Tools run only in Podman.
 
 Not an exploitation platform. Metasploit, SQLMap, credential dumping, and host shells are not wired.
 
-## Layout
-
-```
-vscode/                         VS Code 1.133.0 submodule
-  product.json                  Hawaldar name / protocol
-  extensions/hawaldar/          Agent, settings, MCP-mapped tools
-```
-
-## Run
-
-VS Code 1.133 uses **npm**, not Yarn. Node **24.18.0** (see `vscode/.nvmrc`).
+## Preferred: standalone Electron app
 
 ```bash
-cd vscode
+cd desktop
 npm i
-npm run watch
+npm run dev
 ```
 
-In another terminal:
+Needs Node 20+. Open **Settings** for provider, API key, Podman path, and engagement scope. Chat supports `/status`, `/tools`, `/workflow`, specialists (`/nmap`, …). Memory is LibSQL at `~/.hawaldar/mastra.db`.
 
-```bash
-.\scripts\code.bat
-```
+See `desktop/README.md`.
 
-On macOS/Linux use `./scripts/code.sh`. First build is long.
+## Reference: VS Code fork
 
-Open **Hawaldar: Settings** to pick a Mastra provider, set the Podman path, and add in-scope hosts. Chat is `@hawaldar`. Memory is LibSQL at `~/.hawaldar/mastra.db`.
+The `vscode/` submodule remains a reference (Code-OSS + `extensions/hawaldar`). Building it requires Node 24.18+, Spectre MSVC libs on Windows, and a long `npm i` / `npm run watch`. Prefer `desktop/` for day-to-day use.
 
 ## Tools
 
-Tool names match public MCP servers (nmap-mcp, WireMCP, GhidraMCP, radare2-mcp, pd-tools-mcp, and others). Execution is Hawaldar’s policy gate + Podman, not those MCP processes.
+Hawaldar owns the recon and analysis tools. They run in Podman images behind the policy gate.
 
-See `ARCHITECTURE.md` for the map and the refused list.
+See `ARCHITECTURE.md` for the catalog and the refused list.

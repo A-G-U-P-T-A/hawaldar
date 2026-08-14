@@ -1,0 +1,11 @@
+ARG VERSION=1.6.9
+FROM docker.io/library/alpine:3.20 AS down
+ARG VERSION
+RUN apk add --no-cache curl ca-certificates unzip \
+	&& curl -fsSL "https://github.com/projectdiscovery/httpx/releases/download/v${VERSION}/httpx_${VERSION}_linux_amd64.zip" -o /tmp/t.zip \
+	&& unzip -j /tmp/t.zip httpx -d /usr/local/bin \
+	&& chmod +x /usr/local/bin/httpx
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates && rm -rf /var/cache/apk/*
+COPY --from=down /usr/local/bin/httpx /usr/local/bin/httpx
+ENTRYPOINT ["httpx"]

@@ -1,0 +1,11 @@
+ARG VERSION=2.6.6
+FROM docker.io/library/alpine:3.20 AS down
+ARG VERSION
+RUN apk add --no-cache curl ca-certificates unzip \
+	&& curl -fsSL "https://github.com/projectdiscovery/subfinder/releases/download/v${VERSION}/subfinder_${VERSION}_linux_amd64.zip" -o /tmp/t.zip \
+	&& unzip -j /tmp/t.zip subfinder -d /usr/local/bin \
+	&& chmod +x /usr/local/bin/subfinder
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates && rm -rf /var/cache/apk/*
+COPY --from=down /usr/local/bin/subfinder /usr/local/bin/subfinder
+ENTRYPOINT ["subfinder"]

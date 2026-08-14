@@ -1,0 +1,5 @@
+# Minimal tshark — Alpine tshark only.
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache tshark \
+	&& rm -rf /var/cache/apk/*
+ENTRYPOINT ["tshark"]
