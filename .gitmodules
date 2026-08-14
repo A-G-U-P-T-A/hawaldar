@@ -1,0 +1,4 @@
+[submodule "vscode"]
+	path = vscode
+	url = https://github.com/microsoft/vscode.git
+	branch = release/1.133
