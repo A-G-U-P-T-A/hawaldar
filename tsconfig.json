@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/engagement" },
+    { "path": "./packages/security-graph" },
+    { "path": "./tools/registry" },
+    { "path": "./apps/runtime" }
+  ]
+}
