@@ -4,6 +4,7 @@
     { "path": "./packages/shared" },
     { "path": "./packages/engagement" },
     { "path": "./packages/security-graph" },
+    { "path": "./packages/sandbox" },
     { "path": "./tools/registry" },
     { "path": "./apps/runtime" }
   ]

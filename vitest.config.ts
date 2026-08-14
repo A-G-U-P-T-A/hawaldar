@@ -11,6 +11,7 @@ export default defineConfig({
       "@hawaldar/engagement": join(root, "packages/engagement/src/index.ts"),
       "@hawaldar/security-graph": join(root, "packages/security-graph/src/index.ts"),
       "@hawaldar/tool-registry": join(root, "tools/registry/src/index.ts"),
+      "@hawaldar/sandbox": join(root, "packages/sandbox/src/index.ts"),
     },
   },
   test: {

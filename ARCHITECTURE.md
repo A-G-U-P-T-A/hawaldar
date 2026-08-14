@@ -6,7 +6,7 @@ Targets are supplied by the operator and must be explicitly in scope (IP, domain
 
 ## Current phase
 
-**Phase 3 complete in this milestone:** universal Tool Registry (metadata + adapter type).
+**Phase 4 complete in this milestone:** SandboxProvider + Podman backend.
 
 Implemented:
 
@@ -15,9 +15,10 @@ Implemented:
 - `@hawaldar/engagement` — Drizzle schema, stores, workspace, deterministic scope matching
 - `@hawaldar/security-graph` — typed nodes/edges over the same database
 - `@hawaldar/tool-registry` — `ToolDefinition`, registry, recon catalog
-- Unit tests, ESLint, TypeScript project references
+- `@hawaldar/sandbox` — `SandboxProvider`, `PodmanSandboxProvider`, injected command runner
+- Host-exec boundary test: only the sandbox runner may import `child_process`
 
-Not implemented yet: sandbox/Podman, policy gate on execution, tool adapters, agents, UI.
+Not implemented yet: policy gate on execution, Nmap adapter, observation normalization, agents, UI.
 
 ## System shape
 
