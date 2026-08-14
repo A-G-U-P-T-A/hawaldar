@@ -12,6 +12,7 @@ export default defineConfig({
       "@hawaldar/security-graph": join(root, "packages/security-graph/src/index.ts"),
       "@hawaldar/tool-registry": join(root, "tools/registry/src/index.ts"),
       "@hawaldar/sandbox": join(root, "packages/sandbox/src/index.ts"),
+      "@hawaldar/policy": join(root, "packages/policy/src/index.ts"),
     },
   },
   test: {

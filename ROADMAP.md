@@ -9,8 +9,8 @@ Product: authorized reconnaissance workstation. Exploitation, persistence, steal
 | 2 | SQLite + engagement model + security graph | done |
 | 3 | Tool Registry | done |
 | 4 | SandboxProvider + Podman | done |
-| 5 | Scope / Policy Engine | next |
-| 6 | Nmap adapter (Podman) | not started |
+| 5 | Scope / Policy Engine | done |
+| 6 | Nmap adapter (Podman) | next |
 | 7 | Observation normalization | not started |
 | 8 | Mastra Orchestrator | not started |
 | 9 | Checkpoint / resume | not started |

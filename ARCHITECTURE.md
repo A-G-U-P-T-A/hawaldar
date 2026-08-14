@@ -6,7 +6,7 @@ Targets are supplied by the operator and must be explicitly in scope (IP, domain
 
 ## Current phase
 
-**Phase 4 complete in this milestone:** SandboxProvider + Podman backend.
+**Phase 5 complete in this milestone:** independent policy engine.
 
 Implemented:
 
@@ -16,9 +16,10 @@ Implemented:
 - `@hawaldar/security-graph` — typed nodes/edges over the same database
 - `@hawaldar/tool-registry` — `ToolDefinition`, registry, recon catalog
 - `@hawaldar/sandbox` — `SandboxProvider`, `PodmanSandboxProvider`, injected command runner
+- `@hawaldar/policy` — scope / capability / approval gate in front of `sandbox.execute`
 - Host-exec boundary test: only the sandbox runner may import `child_process`
 
-Not implemented yet: policy gate on execution, Nmap adapter, observation normalization, agents, UI.
+Not implemented yet: Nmap adapter, observation normalization, agents, UI.
 
 ## System shape
 
@@ -64,7 +65,7 @@ packages/tool-runtime        (Phase 3–4)
 packages/sandbox             (Phase 4)
 packages/mcp                 (Phase 12)
 packages/browser             (Phase 11)
-packages/policy              (Phase 5)
+packages/policy              scope + capability enforcement
 packages/evidence            (Phase 15)
 packages/reporting           (Phase 19)
 tools/registry               ToolDefinition catalog

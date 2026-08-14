@@ -8,10 +8,11 @@
 - [x] Phase 3: Tool Registry + `ToolDefinition` + recon catalog + ADR 0003
 - [x] Phase 4: SandboxProvider + PodmanSandboxProvider + ADR 0004
 - [x] Critical test: only `packages/sandbox` may import `child_process`
+- [x] Phase 5: Policy engine + gated sandbox execute + ADR 0005
 
 ## Now / next
 
-- [ ] Phase 5: Policy engine wrapping `isAuthorizedTarget` on every tool invocation
+- [ ] Phase 6: Nmap adapter (Podman) through the policy gate
 
 ## Later
 
