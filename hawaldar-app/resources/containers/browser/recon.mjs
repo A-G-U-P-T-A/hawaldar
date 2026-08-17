@@ -239,20 +239,10 @@ async function withPage(job, fn) {
 	page.on('download', (download) => {
 		void download.cancel().catch(() => undefined);
 	});
-	page.on('framenavigated', (frame) => {
-		if (frame !== page.mainFrame()) {
-			return;
-		}
-		const href = frame.url();
-		if (!href || href === 'about:blank') {
-			return;
-		}
-		if (!hostAllowed(href, job.allowedHosts, job.searchHop)) {
-			void page.close().catch(() => undefined);
-		}
-	});
+	const scopeState = { lastInScope: job.url, offScope: '' };
+	await installScopeGuard(page, job, scopeState);
 	try {
-		return await fn(page, { consoleEvents, networkEvents });
+		return await fn(page, { consoleEvents, networkEvents, scopeState });
 	} finally {
 		await context.close().catch(() => undefined);
 		await browser.close().catch(() => undefined);
@@ -264,42 +254,117 @@ function isNetworkChanged(error) {
 	return /ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_RESET/i.test(message);
 }
 
-async function gotoAllowed(page, job) {
+function isOffScopeNavAbort(error) {
+	const message = error instanceof Error ? error.message : String(error);
+	return /ERR_BLOCKED_BY_CLIENT|NS_ERROR_ABORT|net::ERR_ABORTED|closed|Target page|redirect left the allow-list/i.test(message);
+}
+
+function safePageUrl(page) {
+	try {
+		return page.url();
+	} catch {
+		return '';
+	}
+}
+
+async function installScopeGuard(page, job, state) {
+	await page.route('**/*', async (route) => {
+		const req = route.request();
+		const url = req.url();
+		const nav = req.isNavigationRequest() || req.resourceType() === 'document';
+		if (nav && url && url !== 'about:blank' && !hostAllowed(url, job.allowedHosts, job.searchHop)) {
+			state.offScope = url;
+			return route.abort('blockedbyclient');
+		}
+		return route.continue();
+	});
+	page.context().on('page', (popup) => {
+		const check = () => {
+			const href = popup.url();
+			if (href && href !== 'about:blank' && !hostAllowed(href, job.allowedHosts, job.searchHop)) {
+				state.offScope = href;
+				void popup.close().catch(() => undefined);
+			}
+		};
+		popup.on('framenavigated', check);
+		check();
+	});
+}
+
+function offScopeNote(offScope, stayed) {
+	if (!offScope) {
+		return undefined;
+	}
+	return `Off-scope redirect ignored (${redactUrl(offScope)}). Stayed on last in-scope URL ${redactUrl(stayed)}.`;
+}
+
+async function stayInScope(page, job, state, status) {
+	const fallback = state.lastInScope || job.url;
+	let current = safePageUrl(page);
+	if (!hostAllowed(current, job.allowedHosts, job.searchHop) && fallback && hostAllowed(fallback, job.allowedHosts, job.searchHop)) {
+		try {
+			await page.goto(fallback, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+		} catch {
+			/* keep whatever is loaded */
+		}
+		current = safePageUrl(page) || fallback;
+	}
+	if (!hostAllowed(current, job.allowedHosts, job.searchHop)) {
+		return fail(`Redirect refused: ${redactUrl(state.offScope || current)} is not on the allow-list.`, { url: redactUrl(state.offScope || current) });
+	}
+	state.lastInScope = current;
+	return {
+		ok: true,
+		status: status ?? 0,
+		url: current,
+		note: offScopeNote(state.offScope, current),
+	};
+}
+
+async function gotoAllowed(page, job, state = { lastInScope: job.url, offScope: '' }) {
 	if (!job.url) {
 		return fail('URL is required.');
 	}
 	if (!hostAllowed(job.url, job.allowedHosts, job.searchHop)) {
 		return fail(`Navigation refused: ${redactUrl(job.url)} is not on the allow-list.`);
 	}
+	state.lastInScope = state.lastInScope || job.url;
 	const timeout = Number(job.navTimeout) > 0 ? Number(job.navTimeout) : 60_000;
 	const attempt = () => page.goto(job.url, { waitUntil: 'domcontentloaded', timeout });
 	let response;
 	try {
 		response = await attempt();
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		if (/closed|Target page/i.test(message)) {
-			return fail('Navigation aborted: redirect left the allow-list.');
-		}
-		if (isNetworkChanged(error)) {
-			try {
-				response = await attempt();
-			} catch (retryError) {
-				const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
-				if (/closed|Target page/i.test(retryMessage)) {
-					return fail('Navigation aborted: redirect left the allow-list.');
+		if (isOffScopeNavAbort(error) || isNetworkChanged(error)) {
+			if (isNetworkChanged(error) && !state.offScope) {
+				try {
+					response = await attempt();
+				} catch {
+					return stayInScope(page, job, state, 0);
 				}
-				return fail(retryMessage);
+			} else {
+				return stayInScope(page, job, state, 0);
 			}
 		} else {
-			return fail(message);
+			const current = safePageUrl(page);
+			if (current && hostAllowed(current, job.allowedHosts, job.searchHop)) {
+				return stayInScope(page, job, state, 0);
+			}
+			return fail(error instanceof Error ? error.message : String(error));
 		}
 	}
-	const finalUrl = page.url();
+	const finalUrl = safePageUrl(page);
 	if (!hostAllowed(finalUrl, job.allowedHosts, job.searchHop)) {
-		return fail(`Redirect refused: ${redactUrl(finalUrl)} is not on the allow-list.`, { url: redactUrl(finalUrl) });
+		state.offScope = state.offScope || finalUrl;
+		return stayInScope(page, job, state, response?.status() ?? 0);
 	}
-	return { ok: true, status: response?.status() ?? 0, url: finalUrl };
+	state.lastInScope = finalUrl;
+	return {
+		ok: true,
+		status: response?.status() ?? 0,
+		url: finalUrl,
+		note: offScopeNote(state.offScope, finalUrl),
+	};
 }
 
 async function visibleExcerpt(page) {
@@ -605,7 +670,7 @@ async function runAct(page, job, logs) {
 		return fail('Too many actions (max 10).');
 	}
 	const steps = [];
-	const nav = await gotoAllowed(page, job);
+	const nav = await gotoAllowed(page, job, logs.scopeState);
 	if (!nav.ok) {
 		return nav;
 	}
@@ -708,7 +773,7 @@ async function runXssCanary(context, page, job, logs) {
 		window.__hwPocFired = 0;
 		window.__hwPocMarks = [];
 	});
-	const nav = await gotoAllowed(page, job);
+	const nav = await gotoAllowed(page, job, logs.scopeState);
 	if (!nav.ok) {
 		return nav;
 	}
@@ -791,20 +856,23 @@ async function run(job) {
 		if (job.action === 'xss-canary') {
 			return runXssCanary(page.context(), page, job, logs);
 		}
-		const nav = await gotoAllowed(page, job);
+		const nav = await gotoAllowed(page, job, logs.scopeState);
 		if (!nav.ok) {
 			return nav;
 		}
 		if (job.action === 'open') {
 			const visible = await visibleExcerpt(page);
+			const href = redactUrl(nav.url || page.url());
 			return {
 				ok: true,
 				action: 'open',
 				title: visible.title,
-				url: redactUrl(page.url()),
+				url: href,
 				status: nav.status,
 				excerpt: visible.excerpt,
 				passwordFields: visible.passwordFields,
+				note: nav.note,
+				stayedOn: href,
 			};
 		}
 		if (job.action === 'snapshot') {

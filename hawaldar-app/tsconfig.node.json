@@ -23,6 +23,6 @@
     "src/core/**/*"
   ],
   "exclude": [
-    "src/core/*.test.ts"
+    "src/core/**/*.test.ts"
   ]
 }

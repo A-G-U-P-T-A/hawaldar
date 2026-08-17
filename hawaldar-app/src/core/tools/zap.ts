@@ -9,6 +9,20 @@ import { imageFor, isToolEnabled, type HawaldarSettings } from '../settings';
 import { rewriteLoopbackUrl } from './browser';
 import { BUILTIN_SOURCE, TOOL_CATALOG } from './catalog';
 import { redactSecrets } from './poc';
+import {
+	isZapUrlNotFound,
+	pickZapTreeUrl,
+	withTrailingSlash,
+	zapHostsEquivalent,
+	zapScanUrlCandidates,
+} from './zap-urls';
+
+export {
+	isZapUrlNotFound,
+	pickZapTreeUrl,
+	zapHostsEquivalent,
+	zapScanUrlCandidates,
+} from './zap-urls';
 
 /**
  * OWASP ZAP via its REST API. ZAP is the one long-running tool: a `hw-zap`
@@ -319,8 +333,14 @@ async function runStatus(apiKey: string) {
 }
 
 async function runSpider(apiKey: string, checked: CheckedUrl, budgetMs: number) {
+	const primary = zapScanUrlCandidates(checked.scanUrl, checked.originalUrl)[0] || checked.scanUrl;
+	await zapGet(apiKey, '/JSON/core/action/accessUrl/', {
+		url: primary,
+		followRedirects: 'false',
+	});
+	await sleep(800);
 	const started = await zapGet(apiKey, '/JSON/spider/action/scan/', {
-		url: checked.scanUrl,
+		url: primary,
 		recurse: 'true',
 		subtreeOnly: 'true',
 	});
@@ -328,16 +348,7 @@ async function runSpider(apiKey: string, checked: CheckedUrl, budgetMs: number) 
 	if (!started.ok || !scanId) {
 		return fail(`Spider start failed: ${JSON.stringify(started.json).slice(0, 300)}`);
 	}
-	const deadline = Date.now() + Math.max(10_000, budgetMs - 15_000);
-	let status = '0';
-	while (Date.now() < deadline) {
-		const poll = await zapGet(apiKey, '/JSON/spider/view/status/', { scanId });
-		status = String(poll.json.status ?? status);
-		if (status === '100') {
-			break;
-		}
-		await sleep(2_000);
-	}
+	const status = await waitSpiderStatus(apiKey, scanId, Date.now() + Math.max(10_000, budgetMs - 15_000));
 	let urls: string[] = [];
 	const results = await zapGet(apiKey, '/JSON/spider/view/results/', { scanId });
 	if (Array.isArray(results.json.results)) {
@@ -454,16 +465,25 @@ async function runAlerts(apiKey: string) {
 }
 
 async function runAscan(apiKey: string, checked: CheckedUrl, budgetMs: number) {
-	const tree = await ensureInScanTree(apiKey, checked, budgetMs);
-	if (!tree.ok) {
-		return fail(`Active scan start failed: URL Not Found in the Scan Tree. ${tree.reason}`);
-	}
-	const started = await zapGet(apiKey, '/JSON/ascan/action/scan/', {
-		url: checked.scanUrl,
+	const treeUrl = await seedZapScanTree(apiKey, checked, budgetMs);
+	let started = await zapGet(apiKey, '/JSON/ascan/action/scan/', {
+		url: treeUrl,
 		recurse: 'true',
 	});
+	if (isZapUrlNotFound(started.json, started.ok) || !String(started.json.scan ?? '')) {
+		await zapGet(apiKey, '/JSON/core/action/accessUrl/', {
+			url: treeUrl,
+			followRedirects: 'false',
+		});
+		await sleep(1_500);
+		const retryUrl = pickZapTreeUrl(await listZapTreeUrls(apiKey), checked.scanUrl, checked.originalUrl) || treeUrl;
+		started = await zapGet(apiKey, '/JSON/ascan/action/scan/', {
+			url: retryUrl,
+			recurse: 'true',
+		});
+	}
 	const scanId = String(started.json.scan ?? '');
-	if (!started.ok || !scanId) {
+	if (!started.ok || !scanId || isZapUrlNotFound(started.json, started.ok)) {
 		return fail(`Active scan start failed: ${JSON.stringify(started.json).slice(0, 300)}`);
 	}
 	const deadline = Date.now() + Math.max(30_000, budgetMs - ASCAN_RESERVE_MS);
@@ -477,10 +497,11 @@ async function runAscan(apiKey: string, checked: CheckedUrl, budgetMs: number) {
 		await sleep(5_000);
 	}
 	const alerts = await fetchAlerts(apiKey, checked);
+	const scannedAs = treeUrl !== checked.originalUrl ? treeUrl : undefined;
 	return finish('zap-ascan', {
 		tool: 'zap-ascan',
 		target: checked.originalUrl,
-		scannedAs: checked.scanUrl !== checked.originalUrl ? checked.scanUrl : undefined,
+		scannedAs,
 		progress: Number(status),
 		complete: status === '100',
 		partial: status !== '100',
@@ -491,67 +512,64 @@ async function runAscan(apiKey: string, checked: CheckedUrl, budgetMs: number) {
 	});
 }
 
-async function urlInScanTree(apiKey: string, checked: CheckedUrl): Promise<boolean> {
-	const host = new URL(checked.originalUrl).host;
-	const scanHost = (() => {
-		try {
-			return new URL(checked.scanUrl).host;
-		} catch {
-			return '';
-		}
-	})();
-	const urlsRes = await zapGet(apiKey, '/JSON/core/view/urls/');
-	const urls: string[] = Array.isArray(urlsRes.json.urls) ? urlsRes.json.urls.map((item: unknown) => String(item)) : [];
-	if (urls.some((item) => {
-		try {
-			const restored = restoreUrl(item, checked);
-			const h = new URL(restored).host;
-			return h === host || (scanHost && h === scanHost);
-		} catch {
-			return item.includes(host) || (scanHost && item.includes(scanHost));
-		}
-	})) {
-		return true;
-	}
-	const sitesRes = await zapGet(apiKey, '/JSON/core/view/sites/');
-	const sites: string[] = Array.isArray(sitesRes.json.sites) ? sitesRes.json.sites.map((item: unknown) => String(item)) : [];
-	return sites.some((item) => item.includes(host) || (scanHost && item.includes(scanHost)));
-}
-
-/** ZAP ascan refuses URLs that are not already in the Sites/Scan tree. Access then spider. */
-async function ensureInScanTree(
-	apiKey: string,
-	checked: CheckedUrl,
-	budgetMs: number,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-	if (await urlInScanTree(apiKey, checked)) {
-		return { ok: true };
-	}
+/**
+ * ZAP ascan requires the exact Sites-tree URL. Always accessUrl (no off-host
+ * redirects) → spider → wait, then pick the tree URL that matches 127.0.0.1 ↔
+ * host.containers.internal. Lone zap-ascan must not depend on a prior playbook spider.
+ */
+async function seedZapScanTree(apiKey: string, checked: CheckedUrl, budgetMs: number): Promise<string> {
+	const primary = zapScanUrlCandidates(checked.scanUrl, checked.originalUrl)[0] || checked.scanUrl;
 	await zapGet(apiKey, '/JSON/core/action/accessUrl/', {
-		url: checked.scanUrl,
-		followRedirects: 'true',
+		url: primary,
+		followRedirects: 'false',
 	});
 	await sleep(1_500);
-	if (await urlInScanTree(apiKey, checked)) {
-		return { ok: true };
-	}
 	const spiderBudget = Math.min(Math.max(20_000, budgetMs - 60_000), 180_000);
-	await runSpider(apiKey, checked, spiderBudget);
-	if (await urlInScanTree(apiKey, checked)) {
-		return { ok: true };
+	const spider = await zapGet(apiKey, '/JSON/spider/action/scan/', {
+		url: primary,
+		recurse: 'true',
+		subtreeOnly: 'true',
+	});
+	const spiderId = String(spider.json.scan ?? '');
+	if (spider.ok && spiderId) {
+		await waitSpiderStatus(apiKey, spiderId, Date.now() + spiderBudget);
 	}
-	return {
-		ok: false,
-		reason: `accessUrl + spider did not add ${checked.originalUrl} to the ZAP scan tree.`,
-	};
+	return pickZapTreeUrl(await listZapTreeUrls(apiKey), checked.scanUrl, checked.originalUrl)
+		|| withTrailingSlash(primary);
+}
+
+async function waitSpiderStatus(apiKey: string, scanId: string, deadline: number): Promise<string> {
+	let status = '0';
+	while (Date.now() < deadline) {
+		const poll = await zapGet(apiKey, '/JSON/spider/view/status/', { scanId });
+		status = String(poll.json.status ?? status);
+		if (status === '100') {
+			break;
+		}
+		await sleep(2_000);
+	}
+	return status;
+}
+
+async function listZapTreeUrls(apiKey: string): Promise<string[]> {
+	const urlsRes = await zapGet(apiKey, '/JSON/core/view/urls/');
+	const urls: string[] = Array.isArray(urlsRes.json.urls) ? urlsRes.json.urls.map((item: unknown) => String(item)) : [];
+	const sitesRes = await zapGet(apiKey, '/JSON/core/view/sites/');
+	const sites: string[] = Array.isArray(sitesRes.json.sites) ? sitesRes.json.sites.map((item: unknown) => String(item)) : [];
+	return [...urls, ...sites];
 }
 
 /** Alerts from the alert component (core view as fallback), host-capped to the checked target. */
 async function fetchAlerts(apiKey: string, checked: CheckedUrl | undefined): Promise<any[]> {
 	const params: Record<string, string> = { start: '0', count: String(ALERT_CAP) };
 	if (checked) {
-		const original = new URL(checked.originalUrl);
-		params.baseurl = `${original.protocol}//${original.host}`;
+		try {
+			const scan = new URL(checked.scanUrl);
+			params.baseurl = `${scan.protocol}//${scan.host}`;
+		} catch {
+			const original = new URL(checked.originalUrl);
+			params.baseurl = `${original.protocol}//${original.host}`;
+		}
 	}
 	let res = await zapGet(apiKey, '/JSON/alert/view/alerts/', params);
 	if (!res.ok || !Array.isArray(res.json.alerts)) {
@@ -562,9 +580,18 @@ async function fetchAlerts(apiKey: string, checked: CheckedUrl | undefined): Pro
 		return rows;
 	}
 	const host = new URL(checked.originalUrl).host;
+	const scanHost = (() => {
+		try {
+			return new URL(checked.scanUrl).host;
+		} catch {
+			return '';
+		}
+	})();
 	return rows.filter((alert) => {
 		try {
-			return new URL(restoreUrl(String(alert?.url ?? ''), checked)).host === host;
+			const restored = restoreUrl(String(alert?.url ?? ''), checked);
+			const h = new URL(restored).host;
+			return h === host || (scanHost && h === scanHost) || zapHostsEquivalent(new URL(restored).hostname, new URL(checked.originalUrl).hostname);
 		} catch {
 			return false;
 		}

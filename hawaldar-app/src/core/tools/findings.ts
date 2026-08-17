@@ -35,6 +35,7 @@ export function buildFindingInputSchema(z: any, id: string) {
 		return z.object({
 			id: z.string().optional().describe('Existing finding id to update. Omit to create (class+title+target dedupes re-runs).'),
 			title: z.string().describe('Short finding title, e.g. "Authentication bypass via direct dashboard access".'),
+			class: z.string().optional().describe('Alias for vulnClass. Prefer vulnClass.'),
 			vulnClass: z.enum(FINDING_CLASSES as [string, ...string[]]).optional()
 				.describe('injection | xss | ssrf | auth | csrf | ssti | idor | version | other'),
 			severity: z.enum(FINDING_SEVERITIES as [string, ...string[]]).optional()
@@ -43,8 +44,10 @@ export function buildFindingInputSchema(z: any, id: string) {
 				.describe('hypothesis → validating → confirmed | unconfirmed | not-exploitable. confirmed requires steps + evidence.'),
 			target: z.string().optional().describe('Host or URL the finding applies to.'),
 			description: z.string().optional(),
-			steps: z.array(z.string()).optional().describe('Numbered reproduction steps (required for confirmed).'),
-			evidence: z.string().optional().describe('Tool evidence: probe stdout (poc-request/poc-act/sqlmap/zap), status codes, canary markers, SAST locations (required for confirmed). Never "has evidence: true".'),
+			steps: z.union([z.array(z.string()), z.string(), z.number()]).optional()
+				.describe('Reproduction steps as string[]. A number (count from finding-list) is ignored.'),
+			evidence: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).optional()
+				.describe('Tool evidence: probe stdout (poc-request/poc-act/sqlmap/zap), status codes, canary markers, SAST locations (required for confirmed). Never "has evidence: true".'),
 			method: z.string().optional().describe('HTTP method of the probe that proved this finding (GET/POST/…).'),
 			url: z.string().optional().describe('Exact probe URL with 127.0.0.1, never [IP_ADDRESS].'),
 			body: z.union([z.string(), z.record(z.unknown())]).optional().describe('Probe request body if POST/PUT/PATCH.'),
@@ -138,7 +141,7 @@ export async function runFindingTool(
 					severity: row.severity,
 					status: row.status,
 					target: row.target,
-					steps: row.steps.length,
+					stepCount: row.steps.length,
 					hasEvidence: Boolean(row.evidence),
 					updatedAt: row.updatedAt,
 				})),

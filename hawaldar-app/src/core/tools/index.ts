@@ -5,7 +5,7 @@ import type { FindingsStore } from '../findings-store';
 import { definedToolResult, ensureRuntimeHitl, USER_DECLINED, type HitlAsk, type HitlToolContext } from '../hitl';
 import { evaluateToolRules, type RuleRecord, type WorkflowRecord } from '../playbook-store';
 import { fillImpliedToolTarget, parseTargetRef, rejectForbiddenTool, resolveImpliedTargets, restoreTargetPlaceholders, skipReasonForTool } from '../policy';
-import { captureProbe, coerceToolArgs } from '../tool-args';
+import { captureProbe, coerceToolArgs, INVALID_TOOL_ARGS } from '../tool-args';
 import { isServiceStarted } from '../sandbox/podman-services';
 import type { HawaldarSettings } from '../settings';
 import { runBinwalkTool, runRadareTool } from './binary';
@@ -149,6 +149,12 @@ export async function executeTool(
 		? options.impliedTargets
 		: resolveImpliedTargets('', settings.scope).targets;
 	const coerced = coerceToolArgs(id, input as Record<string, unknown>, implied) as ToolInput;
+	const invalidArgs = (coerced as Record<string, unknown>)[INVALID_TOOL_ARGS];
+	if (typeof invalidArgs === 'string' && invalidArgs.trim()) {
+		emitStart(id, 'invalid args');
+		emitDone(id, false, invalidArgs);
+		return { ok: false, stdout: '', stderr: invalidArgs, exitCode: 1 };
+	}
 	const filled: ToolInput = {
 		...coerced,
 		target: fillImpliedToolTarget(id, coerced.target ?? coerced.url, implied, settings.scope),

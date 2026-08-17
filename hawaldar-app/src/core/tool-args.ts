@@ -16,9 +16,12 @@ const RESEARCH_ONLY = /\b(according to|owasp\.org|wikipedia|cwe-\d+|as described
 const HAS_EVIDENCE_TRUE = /\bhas evidence:\s*true\b/i;
 const TOOL_SNIPPET = /poc-request|poc-act|poc-xss-canary|sqlmap-scan|zap-ascan|zap-spider|"status"\s*:\s*\d{3}|bodyExcerpt|"fired"\s*:\s*\d|injectable|not injectable|window\.__hwPocFired|HTTP\/\d(?:\.\d)?\s+\d{3}|action:\s*request/i;
 
+/** Present when wrap had to accept args that still fail the inner schema. Execute returns this as a tool error (no Mastra retry). */
+export const INVALID_TOOL_ARGS = '__hawaldarInvalidArgs';
+
 /**
  * Coerce model tool args BEFORE Zod. Cohere/OpenRouter send `{}`, JSON `body`
- * as an object, and `[IP_ADDRESS]` instead of 127.0.0.1.
+ * as an object, `steps` as a count, and `[IP_ADDRESS]` instead of 127.0.0.1.
  */
 export function coerceToolArgs(
 	toolId: string,
@@ -47,9 +50,63 @@ export function coerceToolArgs(
 	return restored;
 }
 
-/** Wrap a Mastra/Zod inputSchema so coerce runs before parse. */
+/**
+ * Wrap a Mastra/Zod inputSchema so coerce runs before parse.
+ * Zod 4 has no z.preprocess — use transform so Mastra never retry-loops on
+ * coerce-able Cohere shapes. Inner schema JSON is copied so the LLM still
+ * sees field descriptions.
+ */
 export function wrapToolInputSchema(z: any, toolId: string, schema: unknown) {
-	return z.preprocess((value: unknown) => coerceToolArgs(toolId, value), schema);
+	const inner = schema as {
+		safeParse?: (value: unknown) => { success: boolean; data?: unknown; error?: unknown };
+		toJSONSchema?: (...args: unknown[]) => unknown;
+		'~standard'?: { jsonSchema?: unknown };
+	};
+	const apply = (value: unknown) => {
+		const coerced = coerceToolArgs(toolId, value);
+		if (typeof inner.safeParse !== 'function') {
+			return coerced;
+		}
+		const parsed = inner.safeParse(coerced);
+		if (parsed.success) {
+			return parsed.data;
+		}
+		return {
+			...coerced,
+			[INVALID_TOOL_ARGS]: formatSchemaError(parsed.error),
+		};
+	};
+
+	let wrapped: any;
+	if (typeof z?.preprocess === 'function') {
+		wrapped = z.preprocess(apply, typeof z.any === 'function' ? z.any() : schema);
+	} else if (typeof z?.any === 'function') {
+		const anySchema = z.any();
+		wrapped = typeof anySchema.transform === 'function' ? anySchema.transform(apply) : schema;
+	} else if (typeof z?.pipe === 'function' && typeof z?.transform === 'function') {
+		wrapped = z.pipe(z.transform(apply), typeof z.any === 'function' ? z.any() : schema);
+	} else {
+		return schema;
+	}
+	attachJsonSchema(wrapped, inner);
+	return wrapped;
+}
+
+export function formatSchemaError(error: unknown): string {
+	if (!error) {
+		return 'Invalid tool arguments.';
+	}
+	const issues = (error as { issues?: Array<{ path?: unknown; message?: string }> }).issues;
+	if (Array.isArray(issues) && issues.length > 0) {
+		return issues.map((issue) => {
+			const path = Array.isArray(issue.path) ? issue.path.map(String).join('.') : '';
+			return `${path || 'input'}: ${issue.message || 'invalid'}`;
+		}).join('; ');
+	}
+	if (typeof (error as { message?: string }).message === 'string') {
+		return (error as { message: string }).message;
+	}
+	return String(error);
 }
 
 export function evidenceHasToolSnippet(evidence: string): boolean {
@@ -188,8 +245,11 @@ export function reportFileSlug(target: string, implied: readonly string[] = []):
 }
 
 function coerceFindingRecord(args: Record<string, unknown>, implied: readonly string[]): void {
-	if (args.class != null && args.vulnClass == null) {
+	if (args.vulnClass == null && args.class != null) {
 		args.vulnClass = args.class;
+	}
+	if (args.class == null && args.vulnClass != null) {
+		args.class = args.vulnClass;
 	}
 	const title = pickString(args.title) || pickString(args.description);
 	if (!title) {
@@ -208,6 +268,7 @@ function coerceFindingRecord(args: Record<string, unknown>, implied: readonly st
 	} else {
 		args.vulnClass = String(args.vulnClass).toLowerCase();
 	}
+	args.class = args.vulnClass;
 	if (!pickString(args.severity) || !FINDING_SEVERITIES.includes(String(args.severity).toLowerCase() as typeof FINDING_SEVERITIES[number])) {
 		if (args.severity == null) {
 			console.warn('[hawaldar] finding-record: missing severity — coerced to info');
@@ -225,6 +286,67 @@ function coerceFindingRecord(args: Record<string, unknown>, implied: readonly st
 		console.warn('[hawaldar] finding-record: missing target — coerced from engagement context', { target: args.target });
 	} else {
 		args.target = restoreTargetPlaceholders(target, implied);
+	}
+	args.steps = coerceStringList(args.steps, args);
+	const evidence = coerceEvidence(args.evidence);
+	if (evidence !== undefined) {
+		args.evidence = evidence;
+	} else {
+		delete args.evidence;
+	}
+	if (args.references !== undefined) {
+		args.references = coerceStringList(args.references, args);
+	}
+}
+
+/** finding-list returns `steps` as a count; Cohere echoes that number on finding-record. */
+function coerceStringList(value: unknown, args: Record<string, unknown>): string[] {
+	if (Array.isArray(value)) {
+		return value.map((item) => String(item)).map((item) => item.trim()).filter(Boolean);
+	}
+	if (typeof value === 'string' && value.trim()) {
+		return [value.trim()];
+	}
+	if (typeof value === 'number') {
+		const alt = args.reproduction ?? args.reproSteps ?? args.repro;
+		if (alt !== value) {
+			return coerceStringList(alt, {});
+		}
+		return [];
+	}
+	return [];
+}
+
+function coerceEvidence(value: unknown): string | undefined {
+	if (value == null) {
+		return undefined;
+	}
+	if (typeof value === 'string') {
+		return value;
+	}
+	if (typeof value === 'number' || typeof value === 'boolean') {
+		return String(value);
+	}
+	if (typeof value === 'object') {
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return String(value);
+		}
+	}
+	return undefined;
+}
+
+function attachJsonSchema(wrapped: any, source: any): void {
+	if (!wrapped || !source) {
+		return;
+	}
+	if (typeof source.toJSONSchema === 'function') {
+		wrapped.toJSONSchema = (...args: unknown[]) => source.toJSONSchema(...args);
+	}
+	const from = source['~standard']?.jsonSchema;
+	if (from && wrapped['~standard']) {
+		wrapped['~standard'].jsonSchema = from;
 	}
 }
 
