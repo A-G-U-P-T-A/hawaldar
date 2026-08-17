@@ -4,6 +4,7 @@ import { ActivityTrail, FindingLine, MemoryCard, ToolStepList } from './Activity
 import BrandMark from './BrandMark';
 import Dropdown from './Dropdown';
 import MarkdownBody from './MarkdownBody';
+import { toDisplayText, appendStreamDelta } from './displayText';
 import { modelSearchToolbar } from './ThinkToggle';
 import {
 	addressesFromActivity,
@@ -30,15 +31,21 @@ interface Message {
 	activity?: ActivityStep[];
 }
 
-const HISTORY_INITIAL = 2;
-const HISTORY_PAGE = 20;
+const HISTORY_INITIAL = 40;
+const HISTORY_PAGE = 40;
 
 function toUiMessage(row: ChatHistoryMessage): Message {
-	return { id: row.id, role: row.role, text: row.text, createdAt: row.createdAt };
+	return { id: row.id, role: row.role, text: toDisplayText(row.text), createdAt: row.createdAt };
 }
 
 function isOnboardingProviderHint(text: string): boolean {
-	return /set a provider\s*\/\s*API key/i.test(text);
+	return /set a provider\s*\/\s*API key/i.test(text)
+		|| /Settings\s*→\s*Providers?/i.test(text);
+}
+
+function isWeakChatText(text: string): boolean {
+	const trimmed = text.trim();
+	return !trimmed || trimmed === 'Unknown error' || trimmed === '[object Object]';
 }
 
 function resolveAssistantText(
@@ -46,17 +53,18 @@ function resolveAssistantText(
 	result: { text?: string; error?: string },
 	providerReady: boolean,
 ): string {
-	const candidates = [streamed.trim(), (result.error || '').trim(), (result.text || '').trim()].filter(Boolean);
-	const honest = candidates.filter((item) => !isOnboardingProviderHint(item));
-	if (honest.length) {
-		return honest[0];
+	const errorText = toDisplayText(result.error).trim();
+	const streamedText = toDisplayText(streamed).trim();
+	const resultText = toDisplayText(result.text).trim();
+	const candidates = [errorText, streamedText, resultText].filter((item) => item && !isWeakChatText(item));
+	if (candidates.length) {
+		const nonOnboarding = candidates.filter((item) => !isOnboardingProviderHint(item));
+		return (nonOnboarding[0] || candidates[0]);
 	}
-	if (!providerReady && candidates.length) {
-		return candidates[0];
+	if (!providerReady) {
+		return toDisplayText(result.error) || streamedText || resultText || 'No reply from the model.';
 	}
-	return candidates[0] && !isOnboardingProviderHint(candidates[0])
-		? candidates[0]
-		: (result.error || 'No reply from the model.');
+	return errorText || streamedText || resultText || 'No reply from the model.';
 }
 
 interface Props {
@@ -191,11 +199,12 @@ async function collectThreadMessages(
 	const seen = new Set(loaded.map((item) => item.id));
 	const older: Message[] = [];
 	let cursor = loaded[0].createdAt;
+	let cursorId: string | undefined = loaded[0].id;
 	if (!cursor) {
 		return loaded;
 	}
 	for (let page = 0; page < 40; page += 1) {
-		const result = await window.hawaldar.chatHistory(sessionId, { limit: 100, before: cursor });
+		const result = await window.hawaldar.chatHistory(sessionId, { limit: 100, before: cursor, beforeId: cursorId });
 		const batch = result.messages.filter((item) => !seen.has(item.id)).map(toUiMessage);
 		for (const item of batch) {
 			seen.add(item.id);
@@ -209,6 +218,7 @@ async function collectThreadMessages(
 			break;
 		}
 		cursor = next;
+		cursorId = result.messages[0]?.id;
 	}
 	return [...older, ...loaded];
 }
@@ -593,6 +603,7 @@ export default function Chat({
 			return;
 		}
 		const before = messages[0].createdAt;
+		const beforeId = messages[0].id;
 		if (!before) {
 			setHasMore(false);
 			return;
@@ -600,19 +611,19 @@ export default function Chat({
 		loadingOlderRef.current = true;
 		setLoadingOlder(true);
 		try {
-			const page = await window.hawaldar.chatHistory(id, { limit: HISTORY_PAGE, before });
+			const page = await window.hawaldar.chatHistory(id, { limit: HISTORY_PAGE, before, beforeId });
 			if (sessionIdRef.current !== id) {
 				return;
 			}
 			if (el) {
 				adjustFromHeightRef.current = el.scrollHeight;
 			}
-			setHasMore(page.hasMore && page.messages.length > 0);
-			setMessages((prev) => {
-				const seen = new Set(prev.map((item) => item.id));
-				const older = page.messages.filter((item) => !seen.has(item.id)).map(toUiMessage);
-				return older.length ? [...older, ...prev] : prev;
-			});
+			const seen = new Set(messages.map((item) => item.id));
+			const older = page.messages.filter((item) => !seen.has(item.id)).map(toUiMessage);
+			setHasMore(page.hasMore && older.length > 0);
+			if (older.length > 0) {
+				setMessages((prev) => [...older, ...prev]);
+			}
 		} catch {
 			if (sessionIdRef.current === id) {
 				setHasMore(false);
@@ -711,7 +722,7 @@ export default function Chat({
 
 		const unsubDelta = window.hawaldar.onChatDelta((ev) => {
 			setMessages((prev) => prev.map((m) => (
-				m.id === assistantId ? { ...m, text: m.text + ev.delta } : m
+				m.id === assistantId ? { ...m, text: appendStreamDelta(m.text, ev.delta) } : m
 			)));
 		});
 		const unsubActivity = window.hawaldar.onChatActivity((ev) => {
@@ -740,9 +751,9 @@ export default function Chat({
 			}
 			onActivity();
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = toDisplayText(error);
 			setMessages((prev) => prev.map((m) => (
-				m.id === assistantId ? { ...m, text: message, streaming: false } : m
+				m.id === assistantId ? { ...m, text: message || 'Unknown error', streaming: false } : m
 			)));
 		} finally {
 			unsubDelta();
@@ -851,8 +862,21 @@ export default function Chat({
 				onScroll={onListScroll}
 				onWheel={onListWheel}
 			>
-				{loadingOlder && (
-					<div className="history-status">Loading earlier messages…</div>
+				{historyReady && messages.length > 0 && (
+					hasMore ? (
+						<div className="history-top">
+							<button
+								type="button"
+								className="history-load"
+								disabled={loadingOlder}
+								onClick={() => void loadOlder()}
+							>
+								{loadingOlder ? 'Loading earlier messages…' : 'Load older messages'}
+							</button>
+						</div>
+					) : (
+						<div className="history-status">Beginning of conversation</div>
+					)
 				)}
 				{showWelcome && (
 					<div className="welcome">
@@ -892,7 +916,7 @@ export default function Chat({
 					return m.role === 'user' ? (
 						<div key={m.id} className="request-row" title={fullTime}>
 							{time ? <span className="msg-time" aria-hidden>{time}</span> : null}
-							<div className="request-bubble">{m.text}</div>
+							<div className="request-bubble">{toDisplayText(m.text)}</div>
 						</div>
 					) : (
 						<div key={m.id} className="response-row">

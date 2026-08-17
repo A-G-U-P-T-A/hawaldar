@@ -34,7 +34,35 @@ type SavePrompt = {
 
 type View = 'chat' | 'settings' | 'podman' | 'status' | 'agents' | 'tools' | 'workflows' | 'providers' | 'traces' | 'logs';
 
+function hasDesktopApi(): boolean {
+	return typeof window.hawaldar?.getLegal === 'function';
+}
+
+function MissingDesktopBridge() {
+	return (
+		<div className="boot-error">
+			<div className="app-titlebar">
+				<div className="product">Hawaldar</div>
+			</div>
+			<div className="boot-error-body">
+				<h1>Desktop bridge missing</h1>
+				<p>
+					window.hawaldar is not available, so the preload script did not load.
+					Stop this process (Ctrl+C) and run scripts\dev.bat again.
+				</p>
+			</div>
+		</div>
+	);
+}
+
 export default function App() {
+	if (!hasDesktopApi()) {
+		return <MissingDesktopBridge />;
+	}
+	return <AppMain />;
+}
+
+function AppMain() {
 	const { t } = useI18n();
 	const [view, setView] = useState<View>('chat');
 	const [threads, setThreads] = useState<CatalogItem[]>([]);
@@ -57,6 +85,7 @@ export default function App() {
 	const [saveBusy, setSaveBusy] = useState(false);
 	const [hitlAsk, setHitlAsk] = useState<HitlAskEvent | null>(null);
 	const [hitlBusy, setHitlBusy] = useState(false);
+	const hitlBusyRef = useRef(false);
 	const [createTaskTick, setCreateTaskTick] = useState(0);
 	const [createNoteOpen, setCreateNoteOpen] = useState(false);
 	const [createNoteBusy, setCreateNoteBusy] = useState(false);
@@ -298,7 +327,7 @@ export default function App() {
 			try {
 				const list = await window.hawaldar.listFindings();
 				if (!cancelled) {
-					setFindingsCount(list.filter((finding) => finding.status === 'confirmed').length);
+					setFindingsCount(list.length);
 				}
 			} catch {
 				/* findings need a booted runtime */
@@ -313,18 +342,23 @@ export default function App() {
 	}, []);
 
 	const finishHitl = useCallback(async (approved: boolean) => {
-		if (!hitlAsk || hitlBusy) {
+		const ask = hitlAsk;
+		if (!ask || hitlBusyRef.current) {
 			return;
 		}
+		hitlBusyRef.current = true;
 		setHitlBusy(true);
+		const requestId = String(ask.requestId || '');
 		try {
-			await window.hawaldar.respondHitl(hitlAsk.requestId, approved);
+			await window.hawaldar.respondHitl(requestId, approved);
+		} catch (error) {
+			console.error('[hawaldar] hitl.respond', error);
 		} finally {
+			hitlBusyRef.current = false;
 			setHitlBusy(false);
-			const next = hitlQueue.current.shift() ?? null;
-			setHitlAsk(next);
+			setHitlAsk(hitlQueue.current.shift() ?? null);
 		}
-	}, [hitlAsk, hitlBusy]);
+	}, [hitlAsk]);
 
 	useEffect(() => {
 		const onKey = (event: KeyboardEvent) => {
@@ -850,6 +884,8 @@ export default function App() {
 						onOpenNote={onOpenNote}
 						onCreateNote={onCreateNote}
 						onNoteRemoved={(id) => workspace.closeByRef('note', id)}
+						onOpenFindings={onOpenFindings}
+						findingsCount={findingsCount}
 					/>
 				)}
 			</div>

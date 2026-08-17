@@ -1,4 +1,4 @@
-import { getProvider } from './providers';
+import { getProvider, MISSING_API_KEY_HINT, OPENROUTER_MISSING_KEY, resolveProviderApiKey } from './providers';
 import { restoreTargetPlaceholders } from './policy';
 import { currentToolContext } from './tool-context';
 import {
@@ -8,7 +8,7 @@ import {
 } from './working-memory';
 
 /** Shown only when chat returned nothing and no provider / key is configured. */
-export const ONBOARDING_PROVIDER_HINT = 'No reply. Open **Settings** and set a provider / API key.';
+export const ONBOARDING_PROVIDER_HINT = `No reply. ${MISSING_API_KEY_HINT}`;
 
 const TOOL_PART_TYPES = new Set([
 	'tool-call',
@@ -221,16 +221,74 @@ function restoreMessageText(value: string): string {
 	return restoreTargetPlaceholders(value, currentToolContext()?.impliedTargets ?? []);
 }
 
+const EMPTY_TOOL_RESULT = '(tool returned no output)';
+
+function isBlankText(value: unknown): boolean {
+	return typeof value !== 'string' || value.trim().length === 0;
+}
+
+/**
+ * Cohere rejects `tool_results` entries without `outputs`; OpenRouter builds them
+ * from each tool message's content, so an empty output becomes a 400. Mastra's
+ * agent-* delegation maps the result to `result.text ?? ''`, and a sub-agent that
+ * ends on a tool call has no final text — the main empty-output source.
+ */
+function fillEmptyToolResultOutput(part: unknown): unknown {
+	const rec = asRecord(part);
+	if (!rec) {
+		return part;
+	}
+	const type = String(rec.type ?? '');
+	if (type === 'tool-result' || type === 'tool_result') {
+		const output = asRecord(rec.output);
+		if (!output) {
+			return { ...rec, output: { type: 'text', value: EMPTY_TOOL_RESULT } };
+		}
+		const outType = String(output.type ?? '');
+		if (outType === 'text' || outType === 'error-text') {
+			return isBlankText(output.value) ? { ...rec, output: { ...output, value: EMPTY_TOOL_RESULT } } : part;
+		}
+		if (outType === 'json' || outType === 'error-json') {
+			return output.value === undefined ? { ...rec, output: { ...output, value: null } } : part;
+		}
+		if (outType === 'content') {
+			return !Array.isArray(output.value) || output.value.length === 0
+				? { ...rec, output: { type: 'text', value: EMPTY_TOOL_RESULT } }
+				: part;
+		}
+		return part;
+	}
+	if (type === 'tool-invocation') {
+		const inv = asRecord(rec.toolInvocation);
+		if (!inv || (inv.state !== 'result' && inv.state !== 'output-denied' && inv.state !== 'output-error')) {
+			return part;
+		}
+		const result = inv.result;
+		if (result === undefined || result === null || (typeof result === 'string' && !result.trim())) {
+			return { ...rec, toolInvocation: { ...inv, result: EMPTY_TOOL_RESULT } };
+		}
+		const resultRec = asRecord(result);
+		if (resultRec && 'text' in resultRec && isBlankText(resultRec.text)) {
+			return { ...rec, toolInvocation: { ...inv, result: { ...resultRec, text: EMPTY_TOOL_RESULT } } };
+		}
+	}
+	return part;
+}
+
 function rewriteMessageContent<T>(message: T): T {
 	const rec = asRecord(message);
 	if (!rec) {
 		return message;
 	}
+	const selfType = String(rec.type ?? '');
+	if (selfType === 'tool-result' || selfType === 'tool_result' || selfType === 'tool-invocation') {
+		return fillEmptyToolResultOutput(rec) as T;
+	}
 	const next = { ...rec };
 	if (typeof next.content === 'string') {
 		next.content = restoreMessageText(next.content).trim();
 	} else if (Array.isArray(next.content)) {
-		next.content = next.content.filter(partHasPayload);
+		next.content = next.content.map(fillEmptyToolResultOutput).filter(partHasPayload);
 	} else {
 		const inner = asRecord(next.content);
 		if (inner) {
@@ -242,7 +300,7 @@ function rewriteMessageContent<T>(message: T): T {
 				copy.text = restoreMessageText(copy.text).trim();
 			}
 			if (Array.isArray(copy.parts)) {
-				copy.parts = copy.parts.filter(partHasPayload);
+				copy.parts = copy.parts.map(fillEmptyToolResultOutput).filter(partHasPayload);
 			}
 			next.content = copy;
 		}
@@ -251,7 +309,7 @@ function rewriteMessageContent<T>(message: T): T {
 		next.text = restoreMessageText(next.text);
 	}
 	if (Array.isArray(next.parts)) {
-		next.parts = next.parts.filter(partHasPayload);
+		next.parts = next.parts.map(fillEmptyToolResultOutput).filter(partHasPayload);
 	}
 	const role = String(next.role ?? '');
 	if (role === 'tool' && !messageHasSendablePayload(next)) {
@@ -348,9 +406,12 @@ export function wrapMemorySanitize(memory: any): any {
 	if (typeof memory.updateWorkingMemory === 'function') {
 		const updateWorkingMemory = memory.updateWorkingMemory.bind(memory);
 		memory.updateWorkingMemory = async (args: { workingMemory?: string; memory?: string; threadId?: string; resourceId?: string; memoryConfig?: unknown }) => {
-			const next = sanitizeWorkingMemoryUpdate(String(args?.workingMemory ?? args?.memory ?? ''));
+			const raw = String(args?.workingMemory ?? args?.memory ?? '');
+			// Model may echo the provider's [IP_ADDRESS] token; working memory stores real addresses.
+			const restored = restoreTargetPlaceholders(raw, currentToolContext()?.impliedTargets ?? []);
+			const next = sanitizeWorkingMemoryUpdate(restored);
 			if (next === undefined) {
-				return;
+				return 'Working memory unchanged';
 			}
 			try {
 				const existing = await memory.getWorkingMemory?.({
@@ -359,12 +420,14 @@ export function wrapMemorySanitize(memory: any): any {
 					memoryConfig: args.memoryConfig,
 				});
 				if (typeof existing === 'string' && existing.trim() === next.trim()) {
-					return;
+					return 'Working memory updated';
 				}
 			} catch {
 				/* compare is best-effort */
 			}
-			return updateWorkingMemory({ ...args, workingMemory: next });
+			const written = await updateWorkingMemory({ ...args, workingMemory: next });
+			// Mastra turns `undefined` tool results into a stream error ("Unknown error"); always return text.
+			return typeof written === 'string' && written.trim() ? written : 'Working memory updated';
 		};
 	}
 	if (typeof memory.getSystemMessage === 'function') {
@@ -414,7 +477,7 @@ export function providerLooksConfigured(settings: {
 	if (settings.hasSelectedProvider !== true || !settings.provider) {
 		return false;
 	}
-	if (settings.apiKey) {
+	if (resolveProviderApiKey(settings.provider, settings.apiKey)) {
 		return true;
 	}
 	const info = getProvider(settings.provider);
@@ -436,7 +499,8 @@ export function emptyChatFallback(settings: {
 }
 
 export function isOnboardingProviderHint(text: string): boolean {
-	return /set a provider\s*\/\s*API key/i.test(text);
+	return /set a provider\s*\/\s*API key/i.test(text)
+		|| /Settings\s*→\s*Providers?/i.test(text);
 }
 
 function parseJson(value: unknown): unknown {
@@ -452,6 +516,22 @@ function parseJson(value: unknown): unknown {
 	} catch {
 		return value;
 	}
+}
+
+function isWeakErrorText(text: string): boolean {
+	const trimmed = text.trim();
+	return !trimmed
+		|| trimmed === '[object Object]'
+		|| /^unknown error$/i.test(trimmed)
+		|| trimmed === '{}'
+		|| trimmed === '[]';
+}
+
+function stripIpcInvokePrefix(text: string): string {
+	return text
+		.replace(/^Error invoking remote method '[^']+':\s*/i, '')
+		.replace(/^Error:\s*/i, '')
+		.trim();
 }
 
 function collectRawMessages(value: unknown, into: string[], depth = 0): void {
@@ -470,7 +550,20 @@ function collectRawMessages(value: unknown, into: string[], depth = 0): void {
 		}
 		return;
 	}
-	const rec = asRecord(value);
+	if (typeof value === 'number' || typeof value === 'boolean') {
+		const text = String(value);
+		if (!into.includes(text)) {
+			into.push(text);
+		}
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value.slice(0, 20)) {
+			collectRawMessages(item, into, depth + 1);
+		}
+		return;
+	}
+	const rec = inspectError(value);
 	if (!rec) {
 		return;
 	}
@@ -480,44 +573,153 @@ function collectRawMessages(value: unknown, into: string[], depth = 0): void {
 			into.push(label);
 		}
 	}
-	for (const key of ['raw', 'message', 'detail', 'errorMessage', 'cause']) {
-		if (key in rec) {
+	for (const key of ['raw', 'message', 'text', 'detail', 'errorMessage', 'cause', 'responseBody', 'body', 'data', 'error', 'reason', 'value', 'details', 'issues']) {
+		if (key in rec && rec[key] !== value) {
 			collectRawMessages(rec[key], into, depth + 1);
 		}
 	}
-	if (rec.error && rec.error !== rec) {
-		collectRawMessages(rec.error, into, depth + 1);
-	}
-	if (rec.metadata) {
+	if (rec.metadata && rec.metadata !== value) {
 		collectRawMessages(rec.metadata, into, depth + 1);
-	}
-	if (rec.data) {
-		collectRawMessages(rec.data, into, depth + 1);
 	}
 }
 
+/** Copy enumerable + Error/APICallError fields Mastra often hides from JSON.stringify. */
+function inspectError(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const rec = value as Record<string, unknown>;
+	const out: Record<string, unknown> = { ...rec };
+	for (const key of Object.getOwnPropertyNames(value)) {
+		if (key === 'stack') {
+			continue;
+		}
+		try {
+			out[key] = rec[key];
+		} catch {
+			/* getter threw */
+		}
+	}
+	if (value instanceof Error) {
+		out.message = value.message;
+		out.name = value.name;
+		if (value.cause !== undefined) {
+			out.cause = value.cause;
+		}
+	}
+	const extra = value as { text?: unknown; details?: unknown; issues?: unknown; id?: unknown };
+	if (typeof extra.text === 'string' && extra.text.trim()) {
+		out.text = extra.text;
+	}
+	if (extra.details !== undefined) {
+		out.details = extra.details;
+	}
+	if (extra.issues !== undefined) {
+		out.issues = extra.issues;
+	}
+	if (typeof extra.id === 'string' && extra.id.trim()) {
+		out.id = extra.id;
+	}
+	return out;
+}
+
+const SENSITIVE_KEY = /^(api[_-]?key|apiKeyEnc|authorization|bearer|secret|cookie|password|token)$/i;
+
+function safeJson(value: unknown): string {
+	const seen = new Set<unknown>();
+	try {
+		return JSON.stringify(value, (key, item) => {
+			if (SENSITIVE_KEY.test(key)) {
+				return '[redacted]';
+			}
+			if (item && typeof item === 'object') {
+				if (seen.has(item)) {
+					return '[circular]';
+				}
+				seen.add(item);
+			}
+			return item;
+		}) ?? '';
+	} catch {
+		return '';
+	}
+}
+
+function polishErrorText(text: string): string {
+	const trimmed = stripIpcInvokePrefix(text);
+	if (isWeakErrorText(trimmed)) {
+		return 'Unknown error';
+	}
+	if (/an object could not be cloned/i.test(trimmed)) {
+		return 'The main process threw an error that could not be shown. Check the terminal running scripts\\dev.bat.';
+	}
+	if (/no cookie auth credentials/i.test(trimmed)) {
+		return `HTTP 401 · No cookie auth credentials found. ${OPENROUTER_MISSING_KEY}`;
+	}
+	return trimmed;
+}
+
 function extractProviderDetail(error: object): string {
-	const rec = error as Record<string, unknown>;
+	const rec = inspectError(error) ?? (error as Record<string, unknown>);
 	const bits: string[] = [];
 	const provider = rec.provider_name ?? rec.provider;
 	if (typeof provider === 'string' && provider.trim()) {
 		bits.push(provider.trim());
 	}
-	const status = rec.statusCode ?? rec.status;
+	const nested = asRecord(rec.details);
+	const status = rec.statusCode ?? rec.status ?? nested?.status ?? nested?.statusCode;
 	if (typeof status === 'number') {
 		bits.push(`HTTP ${status}`);
 	}
+	if (typeof rec.text === 'string' && rec.text.trim() && !isWeakErrorText(rec.text)) {
+		bits.push(rec.text.trim());
+	}
 	const blobs: string[] = [];
-	collectRawMessages(rec.responseBody, blobs);
-	collectRawMessages(rec.data, blobs);
-	collectRawMessages(rec.cause, blobs);
-	collectRawMessages(rec.metadata, blobs);
-	const useful = blobs.find((item) => /invalid message|non-empty content|tool calls|index \d+/i.test(item))
-		?? blobs.find((item) => item !== 'Provider returned error' && item.length > 8 && item.length < 500);
-	if (useful) {
+	collectRawMessages(rec, blobs);
+	const useful = blobs.find((item) => /no cookie auth|invalid message|non-empty content|tool calls|index \d+|missing|api key|401|validation failed/i.test(item) && !isWeakErrorText(item))
+		?? blobs.find((item) => item !== 'Provider returned error' && !isWeakErrorText(item) && item.length > 8 && item.length < 800);
+	if (useful && !bits.includes(useful)) {
 		bits.push(useful);
 	}
 	return bits.join(' · ');
+}
+
+/**
+ * Coerce assistant / tool / error payloads to a string.
+ * Never returns `[object Object]` (JSON.stringify or error.message instead).
+ * Weak / empty input stays `''` here — 'Unknown error' is reserved for formatChatError
+ * so a blank tool result never renders as a fake failure.
+ */
+export function toDisplayText(value: unknown): string {
+	const text = coerceDisplayText(value);
+	return /^unknown error$/i.test(text.trim()) ? '' : text;
+}
+
+function coerceDisplayText(value: unknown): string {
+	if (value == null) {
+		return '';
+	}
+	if (typeof value === 'string') {
+		return isWeakErrorText(stripIpcInvokePrefix(value)) ? '' : polishErrorText(value);
+	}
+	if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+		return String(value);
+	}
+	if (value instanceof Error) {
+		return formatChatError(value);
+	}
+	const rec = asRecord(value);
+	if (rec) {
+		if (isNonEmptyText(rec.stdout) && !isNonEmptyText(rec.message) && rec.error == null) {
+			return rec.stdout;
+		}
+		if (isNonEmptyText(rec.stderr) && !isNonEmptyText(rec.message)) {
+			return rec.stderr;
+		}
+		return formatChatError(value);
+	}
+	const fallback = String(value);
+	return fallback === '[object Object]' ? '' : fallback;
 }
 
 /** Surface Cohere / OpenRouter 400 detail instead of a bare "Provider returned error". */
@@ -530,30 +732,55 @@ export function formatChatError(error: unknown): string {
 		if (parsed !== error) {
 			return formatChatError(parsed);
 		}
-		return error.trim() || 'Unknown error';
+		return polishErrorText(error);
 	}
 	if (error instanceof Error) {
 		const detail = extractProviderDetail(error);
-		const base = (error.message || error.name).trim() || 'Error';
+		const rawMessage = typeof error.message === 'string' ? error.message.trim() : '';
+		const base = polishErrorText(rawMessage && !isWeakErrorText(rawMessage) ? rawMessage : (error.name || 'Error'));
 		if (!detail) {
+			const json = safeJson(inspectError(error) ?? error);
+			if (json && json !== '{}' && json !== '[]' && isWeakErrorText(base)) {
+				return polishErrorText(json.length > 800 ? `${json.slice(0, 800)}…` : json);
+			}
 			return base;
 		}
-		if (base.includes(detail) || detail.includes(base)) {
-			return detail.length >= base.length ? detail : `${base}\n${detail}`;
+		const polished = polishErrorText(detail);
+		if (isWeakErrorText(base) || base === 'Error' || base.includes(polished) || polished.includes(base)) {
+			return !isWeakErrorText(polished) && polished.length >= base.length ? polished : `${base}\n${polished}`;
 		}
-		return `${base}\n${detail}`;
+		return `${base}\n${polished}`;
 	}
 	const rec = asRecord(error);
 	if (rec) {
 		const detail = extractProviderDetail(rec);
-		if (detail) {
-			return detail;
+		if (detail && !isWeakErrorText(detail)) {
+			return polishErrorText(detail);
 		}
-		if (isNonEmptyText(rec.message)) {
-			return rec.message.trim();
+		if (isNonEmptyText(rec.text) && !isWeakErrorText(rec.text)) {
+			return polishErrorText(rec.text);
+		}
+		if (isNonEmptyText(rec.message) && !isWeakErrorText(rec.message)) {
+			return polishErrorText(rec.message);
+		}
+		if (rec.message && typeof rec.message === 'object') {
+			return formatChatError(rec.message);
+		}
+		if (rec.error && rec.error !== rec) {
+			const nested = formatChatError(rec.error);
+			if (!isWeakErrorText(nested)) {
+				return nested;
+			}
+		}
+		const json = safeJson(inspectError(rec) ?? rec);
+		if (json && json !== '{}' && json !== '[]') {
+			return polishErrorText(json.length > 800 ? `${json.slice(0, 800)}…` : json);
+		}
+		if (detail) {
+			return polishErrorText(detail);
 		}
 	}
-	return String(error);
+	return polishErrorText(safeJson(error) || 'Unknown error');
 }
 
 function contentLooksEmptyInStorage(raw: unknown): boolean {

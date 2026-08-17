@@ -1,9 +1,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { loadMastra, type MastraModules } from './load-mastra';
 import { ensureDataHome } from './data-home';
-import { WORKING_MEMORY_TEMPLATE } from './working-memory';
+import { loadDotenvFiles } from './env-files';
+import { WORKING_MEMORY_TEMPLATE, sanitizeWorkingMemoryUpdate } from './working-memory';
 import { EngagementTracker, type EngagementRun } from './engagement-tracker';
 import { ApprovalsStore } from './approvals-store';
 import { FindingsStore, type FindingFilter } from './findings-store';
@@ -11,11 +13,22 @@ import { NotesStore } from './notes-store';
 import { buildKnowledgeGraph, formatRagContext, KnowledgeStore, tryCreateRouterEmbedder } from './knowledge';
 import {
 	engagementAgentPrompt,
+	isEngagementWorkflow,
+	isEmptyPlaybookOutput,
+	isMissingToolHallucination,
+	isPocPlaybookAgent,
+	pocFallbackJob,
+	gateReportingNarrative,
 	resolveWorkflowRef,
-	SEQUENTIAL_AGENTS,
+	sanitizePlaybookAgentOutput,
 	WORKFLOW_SLASH_ALIASES,
 	adaptWorkflowSteps,
+	clipThreadEvidence,
+	groupIndependentSteps,
+	playbookSqlmapOptions,
+	playbookStepUrl,
 } from './engagement';
+import { type EngagementCheckpoint } from './engagement-checkpoint';
 import {
 	evaluatePlaybookRules,
 	PlaybookStore,
@@ -31,16 +44,27 @@ import {
 	skipReasonForTool,
 } from './policy';
 import { currentToolContext, toolExecContext } from './tool-context';
+import { coerceToolArgs, formatFindingsChatTable, wrapToolInputSchema } from './tool-args';
 import { lookupListedModel } from './model-catalog';
-import { applyProviderEnv, MASTRA_PROVIDERS, routerModelId } from './providers';
+import {
+	applyProviderEnv,
+	MASTRA_PROVIDERS,
+	MISSING_API_KEY_HINT,
+	mastraCustomModelUrl,
+	missingProviderApiKeyError,
+	openRouterRequestHeaders,
+	resolveProviderApiKey,
+	routerModelId,
+} from './providers';
 import { PromptsStore, type SlashCommandDef } from './prompts';
 import { SessionMetaStore, clipSnippet, isPlaceholderSessionTitle, titleFromFirstPrompt, toEpochMs } from './session-meta';
 import { SettingsStore, type HawaldarSettings } from './settings';
 import { TaskStore } from './tasks-store';
 import { AGENT_ROLES, catalogToolsForAgent, EXCLUDED_MCP_TOOLS, isKnowledgeTool, isServiceControlTool, KNOWLEDGE_TOOL_IDS, SERVICE_CONTROL_TOOL_IDS, TOOL_CATALOG, toPublicTool } from './tools/catalog';
 import { consumeAgentStream, type ChatActivity } from './chat-activity';
-import { createEmptyMessageProcessor, formatChatError, purgeEmptyMastraMessages, sanitizeProviderMessages, wrapMemorySanitize } from './chat-messages';
-import { hitlToolSchemas, type HitlAsk } from './hitl';
+import { createEmptyMessageProcessor, formatChatError, providerLooksConfigured, purgeEmptyMastraMessages, sanitizeProviderMessages, toDisplayText, wrapMemorySanitize } from './chat-messages';
+import { isResumeIntent, mastraMemoryOptions } from './stream-text';
+import { definedToolResult, type HitlAsk } from './hitl';
 import { executeTool, type ExecuteToolOptions } from './tools/index';
 import { buildBrowserInputSchema } from './tools/browser';
 import { buildFindingInputSchema, isFindingTool, renderFindingsReport, saveReportArtifact } from './tools/findings';
@@ -101,6 +125,7 @@ export class HawaldarRuntime {
 	private settings!: HawaldarSettings;
 	private mods: MastraModules | undefined;
 	private impliedTargets: string[] = [];
+	private impliedTargetDepth = 0;
 	private peekedMissingActivity = new Set<string>();
 	private activitySink?: (event: ChatActivity) => void;
 	private hitlAsk?: (req: HitlAsk) => Promise<boolean>;
@@ -134,6 +159,7 @@ export class HawaldarRuntime {
 	}
 
 	async reload(): Promise<void> {
+		loadDotenvFiles([this.store.extensionPath, path.dirname(this.store.extensionPath)]);
 		this.settings = await this.store.read();
 		await this.playbooks.refresh();
 		applyProviderEnv(this.settings.provider, this.settings.apiKey, this.settings.baseUrl);
@@ -248,7 +274,7 @@ export class HawaldarRuntime {
 			...item,
 			active: selected && item.id === this.settings.provider,
 			configured: selected && item.id === this.settings.provider
-				? Boolean(this.settings.apiKey || !item.envVar)
+				? Boolean(this.providerApiKey() || !item.envVar)
 				: Boolean(item.envVar && process.env[item.envVar]),
 			modelCount: item.models.length,
 		}));
@@ -543,7 +569,7 @@ export class HawaldarRuntime {
 
 	async listThreadHistory(
 		threadId: string,
-		opts: { limit?: number; before?: number } = {},
+		opts: { limit?: number; before?: number; beforeId?: string } = {},
 	): Promise<ThreadHistoryPage> {
 		await this.ready;
 		const id = String(threadId || '').trim();
@@ -552,6 +578,7 @@ export class HawaldarRuntime {
 		}
 		const limit = Math.max(1, Math.min(Math.floor(opts.limit ?? 2), 100));
 		const before = typeof opts.before === 'number' && opts.before > 0 ? opts.before : undefined;
+		const beforeId = typeof opts.beforeId === 'string' && opts.beforeId.trim() ? opts.beforeId.trim() : undefined;
 		const batchSize = Math.min(Math.max(limit * 4, 16), 80);
 
 		let displayable: ThreadHistoryMessage[] = [];
@@ -583,6 +610,9 @@ export class HawaldarRuntime {
 					if (!item) {
 						return false;
 					}
+					if (beforeId && item.id === beforeId) {
+						return false;
+					}
 					return !seen.has(item.id);
 				});
 			displayable = [...mapped, ...displayable];
@@ -610,7 +640,11 @@ export class HawaldarRuntime {
 	}
 
 	emitActivity(event: ChatActivity): void {
-		this.activitySink?.(event);
+		this.activitySink?.({
+			...event,
+			detail: event.detail ? toDisplayText(event.detail) : '',
+			name: toDisplayText(event.name) || String(event.name || 'tool'),
+		});
 	}
 
 	async withActivity<T>(sink: (event: ChatActivity) => void, fn: () => Promise<T>): Promise<T> {
@@ -655,26 +689,47 @@ export class HawaldarRuntime {
 		};
 	}
 
+	private agentMemory(threadId: string, readOnly?: boolean, skipRecall?: boolean) {
+		return mastraMemoryOptions(threadId, RESOURCE, { readOnly, skipRecall });
+	}
+
+	private providerApiKey(): string {
+		return resolveProviderApiKey(this.settings.provider, this.settings.apiKey);
+	}
+
 	async streamAgent(
 		agentId: string,
 		prompt: string,
 		threadId: string,
 		onDelta: (text: string) => void,
-		opts?: { readOnlyMemory?: boolean },
+		opts?: { readOnlyMemory?: boolean; skipResume?: boolean; maxSteps?: number },
 	): Promise<string> {
 		await this.ready;
 		await this.touchThread(threadId, prompt);
+		this.setActiveThread(threadId);
+		loadDotenvFiles([this.store.extensionPath, path.dirname(this.store.extensionPath)]);
 		const settings = await this.store.read();
 		this.settings = settings;
+		applyProviderEnv(this.settings.provider, this.settings.apiKey, this.settings.baseUrl);
+		this.assertProviderCredentials();
+		if (!opts?.readOnlyMemory && !opts?.skipResume && isResumeIntent(prompt)) {
+			const resumed = await this.tryResumeEngagement(threadId);
+			if (resumed != null) {
+				onDelta(resumed);
+				return resumed;
+			}
+		}
 		const { formatEngagementScopeContext, resolveImpliedTargets } = await import('./policy');
 		const implied = resolveImpliedTargets(prompt, settings.scope);
 		this.impliedTargets = implied.targets;
+		this.impliedTargetDepth += 1;
 		const restoredPrompt = restoreTargetPlaceholders(prompt, implied.targets);
 		const scopeContext = restoreTargetPlaceholders(formatEngagementScopeContext(settings.scope, implied), implied.targets);
-		const ragHits = this.knowledge
-			? await this.knowledge.search(restoredPrompt, { topK: 8, threadId }).catch(() => [])
-			: [];
-		const ragContext = formatRagContext(ragHits);
+		const skipRag = agentId === 'reporting' || agentId === 'validation';
+		const ragHits = skipRag || !this.knowledge
+			? []
+			: await this.knowledge.search(restoredPrompt, { topK: 8, threadId }).catch(() => []);
+		const ragContext = skipRag ? '' : formatRagContext(ragHits);
 		const role = AGENT_ROLES.find((item) => item.id === agentId);
 		const instructions = restoreTargetPlaceholders(`${this.prompts.instructionsFor(
 			agentId,
@@ -685,7 +740,7 @@ export class HawaldarRuntime {
 			{ role: 'system' as const, content: scopeContext },
 			...(ragContext ? [{ role: 'system' as const, content: ragContext }] : []),
 		]);
-		return toolExecContext.run({ impliedTargets: implied.targets, readOnlyMemory: opts?.readOnlyMemory }, async () => {
+		return toolExecContext.run({ impliedTargets: implied.targets, readOnlyMemory: opts?.readOnlyMemory, lastProbes: [] }, async () => {
 		try {
 			this.emitActivity({
 				type: 'agent',
@@ -695,12 +750,8 @@ export class HawaldarRuntime {
 			});
 			const agent = this.mastra.getAgentById(agentId);
 			const streamOptions = {
-				maxSteps: 10,
-				memory: {
-					thread: { id: threadId },
-					resource: RESOURCE,
-					...(opts?.readOnlyMemory ? { options: { readOnly: true } } : {}),
-				},
+				maxSteps: opts?.maxSteps ?? 8,
+				memory: this.agentMemory(threadId, opts?.readOnlyMemory, skipRag),
 				instructions,
 				context,
 				...this.reasoningStreamOptions(),
@@ -722,63 +773,52 @@ export class HawaldarRuntime {
 						});
 						return { proceed: true };
 					},
+					// Mastra maps the delegation tool result to `result.text ?? ''`; a
+					// sub-agent that ends on a tool call has no final text, and the
+					// empty string becomes a Cohere tool_results-without-outputs 400.
+					onDelegationComplete: async (context: {
+						primitiveId: string;
+						result?: { text?: string; subAgentToolResults?: unknown[] };
+					}) => {
+						const text = context.result?.text ?? '';
+						if (text.trim()) {
+							return undefined;
+						}
+						const calls = Array.isArray(context.result?.subAgentToolResults)
+							? context.result.subAgentToolResults.length
+							: 0;
+						this.exporter.pushLog('warn', `delegate → ${context.primitiveId} returned no summary text`);
+						return {
+							resultText: `[${context.primitiveId}] finished with no summary text (${calls} tool call${calls === 1 ? '' : 's'} ran). Treat the sub-agent tool outputs as the evidence.`,
+						};
+					},
 				},
 			};
 			let stream = await agent.stream(restoredPrompt, streamOptions);
 			let collected = '';
-			for (;;) {
-				const result = await consumeAgentStream(stream, onDelta, (event) => this.emitActivity(event));
-				collected += result.text;
-				if (!result.suspended) {
-					if (!opts?.readOnlyMemory) {
-						void this.ingestChatTurn(threadId, restoredPrompt, collected);
-					}
-					await this.touchThread(threadId, collected || restoredPrompt);
-					return collected;
+			const result = await consumeAgentStream(stream, onDelta, (event) => this.emitActivity(event));
+			collected += result.text;
+			if (!result.suspended) {
+				if (!opts?.readOnlyMemory) {
+					void this.ingestChatTurn(threadId, restoredPrompt, collected);
 				}
-				const pending = result.suspended;
-				let runId = pending.runId || String(stream.runId ?? '');
-				if (!runId && typeof agent.listSuspendedRuns === 'function') {
-					const listed = await agent.listSuspendedRuns({ threadId, resourceId: RESOURCE });
-					runId = String(listed?.runs?.[0]?.runId ?? '');
-				}
-				const waitName = pending.payload.kind === 'podman'
-					? 'podman'
-					: (pending.payload.serviceId || pending.toolName || 'image');
-				this.emitActivity({
-					type: 'tool:start',
-					name: waitName,
-					detail: pending.payload.title || 'Waiting for approval…',
-					status: 'start',
-				});
-				const approved = this.hitlAsk ? await this.hitlAsk(pending.payload) : false;
-				this.emitActivity({
-					type: 'tool:done',
-					name: waitName,
-					detail: approved ? 'Approved' : 'user declined',
-					status: approved ? 'ok' : 'error',
-				});
-				if (!runId) {
-					return collected || (approved ? '' : 'user declined');
-				}
-				stream = await agent.resumeStream(
-					{
-						approved,
-						kind: pending.payload.kind,
-						serviceId: pending.payload.serviceId,
-					},
-					{
-						runId,
-						toolCallId: pending.toolCallId || undefined,
-						memory: { thread: { id: threadId }, resource: RESOURCE },
-						...this.reasoningStreamOptions(),
-					},
-				);
+				await this.touchThread(threadId, collected || restoredPrompt);
+				return collected;
 			}
+			this.exporter.pushLog('warn', `Ignoring Mastra suspend (${result.suspended.toolName || result.suspended.payload.kind}); approval is IPC-only.`);
+			const fallback = collected || 'Operator approval uses the in-app dialog. The model suspend/resume path is disabled so Approve cannot crash the app. Retry the probe if it did not run.';
+			if (!opts?.readOnlyMemory) {
+				void this.ingestChatTurn(threadId, restoredPrompt, fallback);
+			}
+			await this.touchThread(threadId, fallback);
+			return fallback;
 		} catch (error) {
-			throw new Error(formatChatError(error), { cause: error });
+			throw new Error(formatChatError(error));
 		} finally {
-			this.impliedTargets = [];
+			this.impliedTargetDepth = Math.max(0, this.impliedTargetDepth - 1);
+			if (this.impliedTargetDepth === 0) {
+				this.impliedTargets = [];
+			}
 		}
 		});
 	}
@@ -804,13 +844,13 @@ export class HawaldarRuntime {
 			.slice(0, 6);
 		const runOne = async (job: { agentId: string; prompt: string }) => {
 			try {
-				const text = await this.streamAgent(job.agentId, job.prompt, threadId, () => {}, { readOnlyMemory: true });
+				const text = await this.streamAgent(job.agentId, job.prompt, threadId, () => {}, { readOnlyMemory: true, maxSteps: 8 });
 				return { agentId: job.agentId, text };
 			} catch (error) {
 				return {
 					agentId: job.agentId,
 					text: '',
-					error: error instanceof Error ? error.message : String(error),
+					error: formatChatError(error),
 				};
 			}
 		};
@@ -824,7 +864,42 @@ export class HawaldarRuntime {
 		return Promise.all(work.map((job) => runOne(job)));
 	}
 
-	async runWorkflow(workflowKey: string, input: Record<string, unknown>): Promise<string> {
+	async tryResumeEngagement(threadId: string): Promise<string | undefined> {
+		await this.ready;
+		this.setActiveThread(threadId);
+		const checkpoint = await this.sessions.getEngagement(threadId);
+		if (!checkpoint || checkpoint.status === 'done' || !checkpoint.workflowId) {
+			return undefined;
+		}
+		const def = this.playbooks.getWorkflow(checkpoint.workflowId);
+		if (!def?.enabled) {
+			return undefined;
+		}
+		const input: Record<string, unknown> = {
+			...checkpoint.input,
+			target: checkpoint.target || checkpoint.input.target,
+			message: checkpoint.input.message || checkpoint.target,
+		};
+		await this.persistThreadMessages(threadId, [{ role: 'user', content: 'retry' }]);
+		return this.runWorkflow(def.id, input, {
+			threadId,
+			resume: {
+				skipStepIds: checkpoint.completedStepIds || [],
+				retryStepId: checkpoint.failedStepId,
+			},
+			skipPersistUser: true,
+		});
+	}
+
+	async runWorkflow(
+		workflowKey: string,
+		input: Record<string, unknown>,
+		opts?: {
+			threadId?: string;
+			resume?: { skipStepIds: string[]; retryStepId?: string };
+			skipPersistUser?: boolean;
+		},
+	): Promise<string> {
 		await this.ready;
 		const def = this.playbooks.getWorkflow(workflowKey);
 		if (!def) {
@@ -836,29 +911,50 @@ export class HawaldarRuntime {
 		if (workflowHasExploitStep(def.steps)) {
 			throw new Error(`Workflow ${def.id} contains a refused exploit step. Proof runs through the sanctioned poc-* validators.`);
 		}
+		if (opts?.threadId) {
+			this.setActiveThread(opts.threadId);
+		}
 		const thread = await this.ensureThread();
 		const hint = String(input.message || input.target || input.filePath || input.pcapPath || def.name);
 		await this.touchThread(thread.id, hint);
+		loadDotenvFiles([this.store.extensionPath, path.dirname(this.store.extensionPath)]);
 		const settings = await this.store.read();
+		this.settings = settings;
+		applyProviderEnv(this.settings.provider, this.settings.apiKey, this.settings.baseUrl);
 		const decision = evaluatePlaybookRules(this.playbooks.listRules(), def, settings);
 		if (!decision.ok) {
 			throw new Error(decision.reason);
 		}
-		const run = async () => {
-			const workflow = this.mastra.getWorkflow(def.key)
-				?? this.mastra.getWorkflowById?.(def.key)
-				?? this.mastra.getWorkflowById?.(def.id);
-			if (workflow) {
-				const created = await workflow.createRun();
-				const result = await created.start({ inputData: input });
-				if (result.status === 'failed') {
-					throw new Error(String(result.error ?? 'workflow failed'));
-				}
-				return JSON.stringify(result.result ?? result, null, 2);
-			}
-			return this.runSequentialSteps(def, input);
-		};
-		return decision.maxTimeoutMs ? withDeadline(run(), decision.maxTimeoutMs) : run();
+		const userLine = `/${def.id} ${hint}`.trim();
+		if (!opts?.skipPersistUser) {
+			await this.persistThreadMessages(thread.id, [{ role: 'user', content: userLine }]);
+		}
+		await this.syncEngagementWorkingMemory(thread.id, {
+			target: String(input.target || hint),
+			workflowId: def.id,
+			status: 'running',
+			lastStep: opts?.resume?.retryStepId,
+		});
+		this.emitActivity({
+			type: 'agent',
+			name: def.id,
+			detail: opts?.resume ? `resume ${def.name}` : def.name,
+			status: 'ok',
+		});
+		const run = () => this.runSequentialSteps(def, input, [], '', {
+			threadId: thread.id,
+			skipStepIds: opts?.resume?.skipStepIds,
+			retryStepId: opts?.resume?.retryStepId,
+		});
+		try {
+			const output = decision.maxTimeoutMs ? await withDeadline(run(), decision.maxTimeoutMs) : await run();
+			await this.persistThreadMessages(thread.id, [{ role: 'assistant', content: output || '(empty workflow)' }]);
+			return output;
+		} catch (error) {
+			const message = formatChatError(error);
+			await this.persistThreadMessages(thread.id, [{ role: 'assistant', content: message }]);
+			throw error;
+		}
 	}
 
 	async runSequentialSteps(
@@ -866,6 +962,7 @@ export class HawaldarRuntime {
 		input: Record<string, unknown>,
 		stack: string[] = [],
 		priorEvidence = '',
+		resume?: { threadId?: string; skipStepIds?: string[]; retryStepId?: string },
 	): Promise<string> {
 		if (stack.includes(def.id)) {
 			return `Skipped nested ${def.id} (cycle).`;
@@ -907,6 +1004,12 @@ export class HawaldarRuntime {
 		};
 		const nextStack = [...stack, def.id];
 		let prior = priorEvidence;
+		const threadId = resume?.threadId || this.activeThreadId || '';
+		if (stack.length === 0 && threadId && !prior.trim()) {
+			prior = await this.recallPlaybookPrior(threadId, String(stepInput.message || ''));
+		}
+		const skip = new Set(resume?.skipStepIds || []);
+		const retryStepId = resume?.retryStepId;
 		const track = stack.length === 0
 			? this.engagement.begin(
 				def,
@@ -915,14 +1018,84 @@ export class HawaldarRuntime {
 			)
 			: undefined;
 		const adapted = adaptWorkflowSteps(def.id, def.steps, typeof stepInput.target === 'string' ? stepInput.target : blob);
+		const completedStepIds = adapted.filter((step) => skip.has(step.id) && step.id !== retryStepId).map((step) => step.id);
+		const writeCheckpoint = async (status: EngagementCheckpoint['status'], failedStepId?: string) => {
+			if (stack.length > 0 || !threadId) {
+				return;
+			}
+			await this.sessions.setEngagement(threadId, {
+				workflowId: def.id,
+				workflowName: def.name,
+				target: String(workflowTarget || input.target || input.message || ''),
+				input: stepInput,
+				completedStepIds: [...completedStepIds],
+				failedStepId,
+				status,
+				updatedAt: Date.now(),
+			});
+		};
+		if (stack.length === 0 && threadId) {
+			await writeCheckpoint('running', retryStepId);
+			await this.syncEngagementWorkingMemory(threadId, {
+				target: String(workflowTarget || input.target || ''),
+				workflowId: def.id,
+				status: 'running',
+				lastStep: retryStepId,
+			});
+		}
+		const nestedResume = resume ? { threadId, skipStepIds: resume.skipStepIds, retryStepId: resume.retryStepId } : { threadId };
 		const runStep = async (step: WorkflowStep): Promise<string> => {
+			if (skip.has(step.id) && step.id !== retryStepId) {
+				track?.phaseDone(step.id, 'already completed');
+				return `## ${step.id}\nAlready completed earlier in this engagement.`;
+			}
 			track?.phaseStart(step.id);
 			try {
-				const output = await this.runWorkflowStep(def, step, stepInput, workflowTarget, implied.targets, settings, nextStack, prior);
+				const output = await this.runWorkflowStep(def, step, stepInput, workflowTarget, implied.targets, settings, nextStack, prior, nestedResume);
 				track?.phaseDone(step.id);
+				if (!completedStepIds.includes(step.id)) {
+					completedStepIds.push(step.id);
+				}
+				await writeCheckpoint('running');
+				if (threadId) {
+					await this.syncEngagementWorkingMemory(threadId, {
+						target: String(workflowTarget || input.target || ''),
+						workflowId: def.id,
+						status: 'running',
+						lastStep: step.id,
+					});
+				}
 				return output;
 			} catch (error) {
-				track?.phaseFailed(step.id, error instanceof Error ? error.message : String(error));
+				const detail = formatChatError(error);
+				track?.phaseFailed(step.id, detail);
+				this.exporter.pushLog('warn', `playbook ${def.id} step ${step.id}: ${detail}`);
+				if (!completedStepIds.includes(step.id)) {
+					completedStepIds.push(step.id);
+				}
+				if (isEngagementWorkflow(def.id) || nextStack.includes('full-engagement')) {
+					await writeCheckpoint('running');
+					if (threadId) {
+						await this.syncEngagementWorkingMemory(threadId, {
+							target: String(workflowTarget || input.target || ''),
+							workflowId: def.id,
+							status: 'running',
+							lastStep: step.id,
+							openQuestion: detail,
+						});
+					}
+					return `## ${step.id}\n${detail}`;
+				}
+				await writeCheckpoint('failed', step.id);
+				if (threadId) {
+					await this.syncEngagementWorkingMemory(threadId, {
+						target: String(workflowTarget || input.target || ''),
+						workflowId: def.id,
+						status: 'failed',
+						lastStep: step.id,
+						openQuestion: detail,
+					});
+				}
 				throw error;
 			}
 		};
@@ -930,11 +1103,23 @@ export class HawaldarRuntime {
 		try {
 			const parts: string[] = [];
 			for (const batch of groupIndependentSteps(adapted)) {
-				const rows = batch.length === 1
-					? [await runStep(batch[0])]
-					: await Promise.all(batch.map((step) => runStep(step)));
+				const pocBatch = batch.length > 1 && batch.every((step) => step.kind === 'agent' && isPocPlaybookAgent(step.id));
+				const rows = pocBatch
+					? await this.runPocAgentsParallel(def, batch, stepInput, workflowTarget, implied.targets, settings, prior, threadId)
+					: batch.length === 1
+						? [await runStep(batch[0])]
+						: await Promise.all(batch.map((step) => runStep(step)));
 				parts.push(...rows);
 				prior = [prior, ...rows].filter(Boolean).join('\n\n').slice(-16_000);
+			}
+			await writeCheckpoint('done');
+			if (threadId) {
+				await this.syncEngagementWorkingMemory(threadId, {
+					target: String(workflowTarget || input.target || ''),
+					workflowId: def.id,
+					status: 'done',
+					lastStep: completedStepIds[completedStepIds.length - 1],
+				});
 			}
 			return parts.join('\n\n') || '(empty workflow)';
 		} catch (error) {
@@ -954,6 +1139,7 @@ export class HawaldarRuntime {
 		settings: HawaldarSettings,
 		nextStack: string[],
 		prior: string,
+		resume?: { threadId?: string; skipStepIds?: string[]; retryStepId?: string },
 	): Promise<string> {
 			if (step.kind === 'workflow') {
 				const child = this.playbooks.getWorkflow(step.id);
@@ -966,7 +1152,7 @@ export class HawaldarRuntime {
 				const nested = await this.runSequentialSteps(child, {
 					...input,
 					message: String(input.message || input.target || child.name),
-				}, nextStack, prior);
+				}, nextStack, prior, resume);
 				return `## workflow:${child.id}\n${nested}`;
 			}
 			if (step.kind === 'tool') {
@@ -979,44 +1165,61 @@ export class HawaldarRuntime {
 					typeof input.target === 'string' ? input.target : workflowTarget,
 					impliedTargets,
 				);
-				const result = await executeTool(settings, step.id, {
-					target: fillImpliedToolTarget(
-						step.id,
-						typeof input.target === 'string' ? input.target : workflowTarget,
+				const stepTarget = typeof input.target === 'string' ? input.target : workflowTarget;
+				const probeUrl = playbookStepUrl(
+					step.id,
+					stepTarget,
+					typeof input.url === 'string' ? input.url : undefined,
+				);
+				const sqlmap = step.id === 'sqlmap-scan' ? playbookSqlmapOptions(stepTarget) : undefined;
+				try {
+					const result = await executeTool(settings, step.id, {
+						target: fillImpliedToolTarget(
+							step.id,
+							typeof input.target === 'string' ? input.target : workflowTarget,
+							impliedTargets,
+							settings.scope,
+						),
+						url: fillImpliedToolTarget(
+							step.id,
+							probeUrl || (typeof input.url === 'string' ? input.url : (typeof input.target === 'string' ? input.target : workflowTarget)),
+							impliedTargets,
+							settings.scope,
+						),
+						filePath: typeof input.filePath === 'string' ? input.filePath : undefined,
+						pcapPath: typeof input.pcapPath === 'string' ? input.pcapPath : undefined,
+						functionName: typeof input.functionName === 'string' ? input.functionName : undefined,
+						address: typeof input.address === 'string' ? input.address : undefined,
+						topPorts: typeof input.topPorts === 'number' ? input.topPorts : undefined,
+						portRange: typeof input.portRange === 'string'
+							? input.portRange
+							: (focusedPort ? String(focusedPort) : undefined),
+						scanType: typeof input.scanType === 'string' ? input.scanType : undefined,
+						streamIndex: typeof input.streamIndex === 'number' ? input.streamIndex : undefined,
+						streamProto: input.streamProto === 'udp' ? 'udp' : input.streamProto === 'tcp' ? 'tcp' : undefined,
+						limit: typeof input.limit === 'number' ? input.limit : undefined,
+						query: typeof input.query === 'string' ? input.query : undefined,
+						module: typeof input.module === 'string' ? input.module : undefined,
+						port: typeof input.port === 'number' ? input.port : focusedPort,
+						engine: typeof input.engine === 'string' ? input.engine : undefined,
+						types: Array.isArray(input.types) ? input.types.filter((item): item is string => typeof item === 'string') : undefined,
+						nameserver: typeof input.nameserver === 'string' ? input.nameserver : undefined,
+						level: sqlmap?.level ?? (typeof input.level === 'number' ? input.level : undefined),
+						risk: sqlmap?.risk ?? (typeof input.risk === 'number' ? input.risk : undefined),
+						forms: sqlmap?.forms ?? (typeof input.forms === 'boolean' ? input.forms : undefined),
+						technique: typeof input.technique === 'string' ? input.technique : undefined,
+					}, this.toolExecOptions({
+						workflow: def,
 						impliedTargets,
-						settings.scope,
-					),
-					url: fillImpliedToolTarget(
-						step.id,
-						typeof input.url === 'string' ? input.url : (typeof input.target === 'string' ? input.target : workflowTarget),
-						impliedTargets,
-						settings.scope,
-					),
-					filePath: typeof input.filePath === 'string' ? input.filePath : undefined,
-					pcapPath: typeof input.pcapPath === 'string' ? input.pcapPath : undefined,
-					functionName: typeof input.functionName === 'string' ? input.functionName : undefined,
-					address: typeof input.address === 'string' ? input.address : undefined,
-					topPorts: typeof input.topPorts === 'number' ? input.topPorts : undefined,
-					portRange: typeof input.portRange === 'string'
-						? input.portRange
-						: (focusedPort ? String(focusedPort) : undefined),
-					scanType: typeof input.scanType === 'string' ? input.scanType : undefined,
-					streamIndex: typeof input.streamIndex === 'number' ? input.streamIndex : undefined,
-					streamProto: input.streamProto === 'udp' ? 'udp' : input.streamProto === 'tcp' ? 'tcp' : undefined,
-					limit: typeof input.limit === 'number' ? input.limit : undefined,
-					query: typeof input.query === 'string' ? input.query : undefined,
-					module: typeof input.module === 'string' ? input.module : undefined,
-					port: typeof input.port === 'number' ? input.port : focusedPort,
-					engine: typeof input.engine === 'string' ? input.engine : undefined,
-					types: Array.isArray(input.types) ? input.types.filter((item): item is string => typeof item === 'string') : undefined,
-					nameserver: typeof input.nameserver === 'string' ? input.nameserver : undefined,
-				}, this.toolExecOptions({
-					workflow: def,
-					impliedTargets,
-				}));
-				return `## ${step.id}\n${toolOutputText(result)}`;
+					}));
+					return `## ${step.id}\n${toolOutputText(result)}`;
+				} catch (error) {
+					const detail = formatChatError(error);
+					this.exporter.pushLog('warn', `playbook ${def.id} tool ${step.id}: ${detail}`);
+					return `## ${step.id}\n${detail}`;
+				}
 			}
-			const thread = await this.ensureThread();
+			const threadId = resume?.threadId || (await this.ensureThread()).id;
 			const message = engagementAgentPrompt({
 				workflowId: def.id,
 				agentId: step.id,
@@ -1025,8 +1228,144 @@ export class HawaldarRuntime {
 				filePath: typeof input.filePath === 'string' ? input.filePath : undefined,
 				prior,
 			});
-			const text = await this.streamAgent(step.id, message, thread.id, () => {});
-			return `## agent:${step.id}\n${text || '(empty)'}`;
+			const maxSteps = isPocPlaybookAgent(step.id) || step.id === 'reporting' || step.id === 'validation' ? 8 : 4;
+			try {
+				let text = await this.streamAgent(step.id, message, threadId, () => {}, {
+					skipResume: true,
+					readOnlyMemory: true,
+					maxSteps,
+				});
+				let output = sanitizePlaybookAgentOutput(text || '', step.id);
+				if (isEmptyPlaybookOutput(output) && isPocPlaybookAgent(step.id)) {
+					this.exporter.pushLog('warn', `playbook ${def.id} agent ${step.id} returned empty — retrying once`);
+					text = await this.streamAgent(step.id, `${message}\n\nYour previous turn returned no tool calls. Call the bounded probe now.`, threadId, () => {}, {
+						skipResume: true,
+						readOnlyMemory: true,
+						maxSteps,
+					});
+					output = sanitizePlaybookAgentOutput(text || '', step.id);
+				}
+				if (isEmptyPlaybookOutput(output) && isPocPlaybookAgent(step.id)) {
+					output = await this.runPocFallback(step.id, typeof input.target === 'string' ? input.target : workflowTarget, settings, impliedTargets, prior);
+				}
+				if (step.id === 'reporting') {
+					const findings = await this.findings.list();
+					const table = formatFindingsChatTable(findings);
+					const exportNote = findings.length
+						? `finding-export wrote the Markdown artifact under ~/.hawaldar/workspace/reports. The table above is this session's findings store.`
+						: '';
+					output = gateReportingNarrative(output, prior, table, exportNote);
+				}
+				return `## agent:${step.id}\n${output}`;
+			} catch (error) {
+				const detail = formatChatError(error);
+				this.exporter.pushLog('warn', `playbook ${def.id} agent ${step.id}: ${detail}`);
+				if (isMissingToolHallucination(detail)) {
+					return `## agent:${step.id}\n${sanitizePlaybookAgentOutput(detail, step.id)}`;
+				}
+				return `## agent:${step.id}\n${detail}`;
+			}
+	}
+
+	private async runPocAgentsParallel(
+		def: WorkflowRecord,
+		batch: WorkflowStep[],
+		input: Record<string, unknown>,
+		workflowTarget: string | undefined,
+		impliedTargets: string[],
+		settings: HawaldarSettings,
+		prior: string,
+		threadId: string,
+	): Promise<string[]> {
+		const jobs = batch.map((step) => ({
+			agentId: step.id,
+			prompt: engagementAgentPrompt({
+				workflowId: def.id,
+				agentId: step.id,
+				target: typeof input.target === 'string' ? input.target : workflowTarget,
+				message: typeof input.message === 'string' ? input.message : undefined,
+				filePath: typeof input.filePath === 'string' ? input.filePath : undefined,
+				prior,
+			}),
+		}));
+		let results = await this.runSpecialistsParallel(jobs, threadId, 'parallel');
+		const empty = results.filter((row) => isEmptyPlaybookOutput(row.text) && !row.error);
+		if (empty.length > 0) {
+			this.exporter.pushLog('warn', `poc-validate empty agents retry: ${empty.map((row) => row.agentId).join(', ')}`);
+			const retried = await this.runSpecialistsParallel(
+				empty.map((row) => ({
+					agentId: row.agentId,
+					prompt: `${jobs.find((job) => job.agentId === row.agentId)?.prompt || ''}\n\nYour previous turn returned no tool calls. Call the bounded probe now.`,
+				})),
+				threadId,
+				'parallel',
+			);
+			results = results.map((row) => retried.find((item) => item.agentId === row.agentId) ?? row);
+		}
+		const out: string[] = [];
+		for (const row of results) {
+			let text = sanitizePlaybookAgentOutput(row.error || row.text || '', row.agentId);
+			if (isEmptyPlaybookOutput(text)) {
+				text = await this.runPocFallback(
+					row.agentId,
+					typeof input.target === 'string' ? input.target : workflowTarget,
+					settings,
+					impliedTargets,
+					prior,
+				);
+			}
+			out.push(`## agent:${row.agentId}\n${text}`);
+		}
+		return out;
+	}
+
+	private async runPocFallback(
+		agentId: string,
+		target: string | undefined,
+		settings: HawaldarSettings,
+		impliedTargets: string[],
+		prior: string,
+	): Promise<string> {
+		if (agentId === 'poc-ssrf') {
+			const hypotheses = await this.findings.list({ vulnClass: 'ssrf', status: 'hypothesis' });
+			if (hypotheses.length === 0) {
+				return 'No SSRF hypothesis in this run. No probe invented.';
+			}
+		}
+		const job = pocFallbackJob(agentId, target);
+		if (!job) {
+			return '(empty)';
+		}
+		this.exporter.pushLog('warn', `poc fallback: ${agentId} → ${job.toolId} ${job.method || ''} ${job.url}`);
+		try {
+			const result = await executeTool(settings, job.toolId, {
+				url: job.url,
+				target: job.url,
+				method: job.method,
+				body: job.body,
+				payload: job.payload,
+			}, this.toolExecOptions({ impliedTargets, sourceAgentId: agentId }));
+			const stdout = toolOutputText(result);
+			const sqlmapNote = /## sqlmap-scan\b/i.test(prior) ? 'sqlmap-scan already ran this turn (cite that output).' : '';
+			await this.findings.upsert({
+				title: agentId === 'poc-injection'
+					? 'Injection probe: POST /rest/user/login'
+					: agentId === 'poc-xss'
+						? 'XSS canary on search'
+						: 'Auth probe: GET /rest/admin',
+				vulnClass: agentId === 'poc-injection' ? 'injection' : agentId === 'poc-xss' ? 'xss' : 'auth',
+				severity: 'info',
+				status: 'not-exploitable',
+				target: job.url,
+				steps: [`${job.method || 'GET'} ${job.url}`],
+				evidence: [sqlmapNote, stdout].filter(Boolean).join('\n\n').slice(0, 8_000),
+				request: { method: job.method, url: job.url, body: job.body, tool: job.toolId },
+				source: agentId,
+			}).catch(() => undefined);
+			return `Runtime ran ${job.toolId} after empty LLM turn.\n${stdout}`;
+		} catch (error) {
+			return `Fallback ${job.toolId} failed: ${formatChatError(error)}`;
+		}
 	}
 
 	onEngagement(listener: (run: EngagementRun) => void): () => void {
@@ -1064,12 +1403,14 @@ export class HawaldarRuntime {
 	async exportFindingsReport(input?: { title?: string; target?: string }) {
 		await this.ready;
 		const rows = await this.findings.list();
+		const implied = this.impliedTargets;
+		const target = restoreTargetPlaceholders(input?.target?.trim() || implied[0] || '', implied);
 		const markdown = renderFindingsReport(rows, {
 			title: input?.title?.trim() || 'Engagement report',
-			target: input?.target?.trim() || this.impliedTargets[0] || '',
+			target,
 		});
-		const saved = saveReportArtifact(markdown, input?.target?.trim() || this.impliedTargets[0] || '');
-		return { ...saved, findings: rows.length };
+		const saved = saveReportArtifact(markdown, target, implied);
+		return { ...saved, findings: rows.length, table: formatFindingsChatTable(rows) };
 	}
 
 	snapshot() {
@@ -1174,6 +1515,115 @@ export class HawaldarRuntime {
 		});
 	}
 
+	private async recallPlaybookPrior(threadId: string, message: string): Promise<string> {
+		const chunks: string[] = [];
+		const pasted = clipThreadEvidence(message, 3_000);
+		if (pasted && !/^https?:\/\/\S+$/i.test(pasted) && pasted.length > 80) {
+			chunks.push(pasted);
+		}
+		if (this.memory?.recall) {
+			try {
+				const recalled = await this.memory.recall({
+					threadId,
+					resourceId: RESOURCE,
+					perPage: 12,
+					page: 0,
+				});
+				const raw = Array.isArray(recalled?.messages) ? recalled.messages : [];
+				const lines: string[] = [];
+				for (const item of raw.slice(-8)) {
+					const mapped = toHistoryMessage(item);
+					if (!mapped?.text) {
+						continue;
+					}
+					const role = mapped.role === 'user' ? 'User' : 'Assistant';
+					lines.push(`${role}: ${clipThreadEvidence(mapped.text, 500)}`);
+				}
+				if (lines.length > 0) {
+					chunks.push(lines.join('\n'));
+				}
+			} catch {
+				/* thread recall is best-effort */
+			}
+		}
+		return chunks.join('\n\n').slice(-8_000);
+	}
+
+	private async persistThreadMessages(
+		threadId: string,
+		rows: Array<{ role: 'user' | 'assistant'; content: string }>,
+	): Promise<void> {
+		const id = String(threadId || '').trim();
+		if (!id || !this.memory || rows.length === 0) {
+			return;
+		}
+		const messages = rows
+			.map((row) => {
+				const content = String(row.content || '').trim();
+				if (!content) {
+					return undefined;
+				}
+				return {
+					id: randomUUID(),
+					role: row.role,
+					type: 'text' as const,
+					createdAt: new Date(),
+					threadId: id,
+					resourceId: RESOURCE,
+					content,
+				};
+			})
+			.filter((item): item is NonNullable<typeof item> => Boolean(item));
+		if (messages.length === 0) {
+			return;
+		}
+		try {
+			if (typeof this.memory.saveMessages === 'function') {
+				await this.memory.saveMessages({ messages });
+				return;
+			}
+			if (typeof this.memory.addMessage === 'function') {
+				for (const item of messages) {
+					await this.memory.addMessage(item);
+				}
+			}
+		} catch (error) {
+			this.exporter.pushLog('warn', `Memory save skipped: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async syncEngagementWorkingMemory(threadId: string, facts: {
+		target: string;
+		workflowId: string;
+		status: string;
+		lastStep?: string;
+		openQuestion?: string;
+	}): Promise<void> {
+		if (!this.memory || typeof this.memory.updateWorkingMemory !== 'function') {
+			return;
+		}
+		const filled = sanitizeWorkingMemoryUpdate([
+			'# Engagement',
+			`- Targets: ${facts.target || ''}`,
+			`- Scope notes: playbook ${facts.workflowId} (${facts.status})`,
+			'- Findings:',
+			`- Open questions: ${facts.openQuestion || ''}`,
+			`- Last tools: ${facts.lastStep || ''}`,
+		].join('\n'));
+		if (!filled) {
+			return;
+		}
+		try {
+			await this.memory.updateWorkingMemory({
+				threadId,
+				resourceId: RESOURCE,
+				workingMemory: filled,
+			});
+		} catch (error) {
+			this.exporter.pushLog('warn', `Working memory update skipped: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	private async ingestChatTurn(threadId: string, prompt: string, reply: string): Promise<void> {
 		if (!this.knowledge) {
 			return;
@@ -1245,20 +1695,44 @@ export class HawaldarRuntime {
 		}
 	}
 
+	private assertProviderCredentials(): void {
+		const apiKey = this.providerApiKey();
+		if (this.settings.provider === 'openrouter' && !apiKey) {
+			throw missingProviderApiKeyError('openrouter');
+		}
+		if (providerLooksConfigured({ ...this.settings, apiKey })) {
+			return;
+		}
+		if (!this.settings.hasSelectedProvider || !this.settings.provider) {
+			throw new Error(`No provider selected. ${MISSING_API_KEY_HINT}`);
+		}
+		throw missingProviderApiKeyError(this.settings.provider);
+	}
+
 	private modelConfig() {
-		const id = this.modelId();
 		const extraBody = this.reasoningExtraBody();
-		const local = ['custom', 'ollama', 'lmstudio'].includes(this.settings.provider)
-			|| this.settings.baseUrl.includes('127.0.0.1') || this.settings.baseUrl.includes('localhost');
-		if (local || this.settings.apiKey || this.settings.baseUrl) {
+		const provider = this.settings.provider;
+		const apiKey = this.providerApiKey();
+		const baseUrl = (this.settings.baseUrl || '').replace(/\/+$/, '');
+		const local = ['custom', 'ollama', 'lmstudio'].includes(provider)
+			|| baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost');
+		// Never pass OpenRouter's own URL: Mastra then skips the OpenRouter gateway
+		// and calls openai-compatible with no Authorization → HTTP 401 cookie-auth.
+		const url = mastraCustomModelUrl(provider, baseUrl, local);
+		const headers = provider === 'openrouter' && apiKey ? openRouterRequestHeaders(apiKey) : undefined;
+		const identity = provider === 'openrouter'
+			? { providerId: 'openrouter', modelId: this.settings.model }
+			: { id: this.modelId() };
+		if (local || apiKey || url) {
 			return {
-				id,
-				url: this.settings.baseUrl || undefined,
-				apiKey: this.settings.apiKey || undefined,
+				...identity,
+				...(url ? { url } : {}),
+				...(apiKey || local ? { apiKey: apiKey || 'local' } : {}),
+				...(headers ? { headers } : {}),
 				...(extraBody ? { extraBody } : {}),
 			};
 		}
-		return extraBody ? { id, extraBody } : id;
+		return extraBody ? { ...identity, extraBody } : (identity as { id?: string }).id ?? this.modelId();
 	}
 
 	/** OpenRouter `reasoning: { effort }` when Thinking is on and the model supports it. */
@@ -1362,10 +1836,9 @@ export class HawaldarRuntime {
 		}).catch((error) => {
 			this.exporter.pushLog('warn', `Empty-message purge skipped: ${error instanceof Error ? error.message : String(error)}`);
 		});
-		const model = this.modelConfig();
+		const model = () => this.modelConfig();
 		const { z, createTool, createStep, createWorkflow, Agent, Mastra, PinoLogger, Observability, MastraStorageExporter, SensitiveDataFilter } = mods;
 		const inputProcessors = [createEmptyMessageProcessor()];
-		const hitl = hitlToolSchemas(z);
 		const tools: Record<string, unknown> = {
 			list_threads: createTool({
 				id: 'list_threads',
@@ -1381,7 +1854,7 @@ export class HawaldarRuntime {
 			}),
 			run_workflow: createTool({
 				id: 'run_workflow',
-				description: 'Run a persisted Hawaldar engagement workflow by id: pre-recon, recon-surface, web-recon, source-review, vuln-detect, poc-validate, validate, report, correlate-report, full-engagement (aliases: full-recon, analyze, poc, prove). PoC validation is HITL-gated and non-destructive; exploit tooling stays refused. Policy and rules apply.',
+				description: 'Orchestrator only. Run a persisted Hawaldar engagement workflow by id: pre-recon, recon-surface, web-recon, source-review, vuln-detect, poc-validate, validate, report, correlate-report, full-engagement (aliases: full-recon, analyze, poc, prove). Call this tool as run_workflow (lowercase, underscore) — never RUN WORKFLOW. Slash /full-engagement is executed by the runtime; this tool is for free chat. PoC validation is HITL-gated and non-destructive; exploit tooling stays refused. Policy and rules apply.',
 				inputSchema: z.object({
 					workflowId: z.string(),
 					target: z.string().optional(),
@@ -1403,7 +1876,7 @@ export class HawaldarRuntime {
 						...input,
 						target: canonical?.display || input.target,
 						message: input.message || blob,
-					}) };
+					}, [], '', { threadId: this.activeThreadId }) };
 				},
 			}),
 			run_specialists: createTool({
@@ -1447,11 +1920,27 @@ export class HawaldarRuntime {
 			identifier: z.string().optional(),
 			mode: z.string().optional(),
 		});
+		const runCatalogTool = async (id: string, input: Record<string, unknown>, context: unknown) => {
+			try {
+				const result = await executeTool(
+					await this.store.read(),
+					id,
+					input,
+					this.toolExecOptions({
+						hitlContext: context as ExecuteToolOptions['hitlContext'],
+						sourceAgentId: TOOL_CATALOG.find((tool) => tool.id === id)?.agentId,
+					}),
+				);
+				return result ?? definedToolResult('Waiting for operator approval.');
+			} catch (error) {
+				return definedToolResult(formatChatError(error), { exitCode: 1 });
+			}
+		};
 		for (const spec of TOOL_CATALOG) {
 			tools[spec.id] = createTool({
 				id: spec.id,
 				description: `${spec.description} Built-in Hawaldar tool. Policy + Podman only.`,
-				inputSchema: isKnowledgeTool(spec.id)
+				inputSchema: wrapToolInputSchema(z, spec.id, isKnowledgeTool(spec.id)
 					? buildKnowledgeInputSchema(z, spec.id)
 					: isFindingTool(spec.id)
 						? buildFindingInputSchema(z, spec.id)
@@ -1481,15 +1970,8 @@ export class HawaldarRuntime {
 														? buildSemgrepInputSchema(z, spec.id)
 														: spec.agentId === 'poc'
 															? buildPocInputSchema(z, spec.id)
-															: toolInputSchema,
-				suspendSchema: hitl.suspendSchema,
-				resumeSchema: hitl.resumeSchema,
-				execute: async (input: Record<string, unknown>, context: unknown) => executeTool(
-					await this.store.read(),
-					spec.id,
-					input,
-					this.toolExecOptions({ hitlContext: context as ExecuteToolOptions['hitlContext'] }),
-				),
+															: toolInputSchema),
+				execute: async (input: Record<string, unknown>, context: unknown) => runCatalogTool(spec.id, coerceToolArgs(spec.id, input), context),
 			});
 		}
 		for (const custom of this.settings.customTools) {
@@ -1499,15 +1981,8 @@ export class HawaldarRuntime {
 			tools[custom.id] = createTool({
 				id: custom.id,
 				description: `${custom.description} Custom Podman tool (${custom.kind}). Policy + Podman only.`,
-				inputSchema: toolInputSchema,
-				suspendSchema: hitl.suspendSchema,
-				resumeSchema: hitl.resumeSchema,
-				execute: async (input: Record<string, unknown>, context: unknown) => executeTool(
-					await this.store.read(),
-					custom.id,
-					input,
-					this.toolExecOptions({ hitlContext: context as ExecuteToolOptions['hitlContext'] }),
-				),
+				inputSchema: wrapToolInputSchema(z, custom.id, toolInputSchema),
+				execute: async (input: Record<string, unknown>, context: unknown) => runCatalogTool(custom.id, coerceToolArgs(custom.id, input), context),
 			});
 		}
 
@@ -1527,6 +2002,9 @@ export class HawaldarRuntime {
 				}
 			}
 			for (const id of KNOWLEDGE_TOOL_IDS) {
+				if (role.id === 'reporting' || role.id === 'validation') {
+					continue;
+				}
 				if (tools[id]) {
 					agentTools[id] = tools[id];
 				}
@@ -1704,42 +2182,6 @@ export class HawaldarRuntime {
 	}
 }
 
-function groupIndependentSteps(steps: WorkflowStep[]): WorkflowStep[][] {
-	const batches: WorkflowStep[][] = [];
-	let current: WorkflowStep[] = [];
-	let kind: WorkflowStep['kind'] | undefined;
-	const flush = () => {
-		if (current.length > 0) {
-			batches.push(current);
-		}
-		current = [];
-		kind = undefined;
-	};
-	const stepAgent = (step: WorkflowStep): string => {
-		if (step.kind === 'agent') {
-			return step.id;
-		}
-		return TOOL_CATALOG.find((tool) => tool.id === step.id)?.agentId ?? step.id;
-	};
-	for (const step of steps) {
-		if (step.kind === 'workflow' || (step.kind === 'agent' && SEQUENTIAL_AGENTS.has(step.id))) {
-			flush();
-			batches.push([step]);
-			continue;
-		}
-		if (kind && kind !== step.kind) {
-			flush();
-		}
-		if (step.kind === 'tool' && current.some((item) => stepAgent(item) === stepAgent(step))) {
-			flush();
-		}
-		kind = step.kind;
-		current.push(step);
-	}
-	flush();
-	return batches;
-}
-
 function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error(`Workflow exceeded max timeout (${ms}ms)`)), ms);
@@ -1795,18 +2237,25 @@ function extractMessageText(content: unknown): string {
 		return content.trim();
 	}
 	if (!content || typeof content !== 'object') {
-		return '';
+		return toDisplayText(content).trim();
 	}
-	const value = content as { content?: unknown; parts?: unknown };
+	const value = content as { content?: unknown; parts?: unknown; text?: unknown };
 	const parts = Array.isArray(value.parts) ? value.parts : Array.isArray(content) ? content : [];
 	const chunks: string[] = [];
 	for (const part of parts) {
+		if (typeof part === 'string' && part.trim()) {
+			chunks.push(part);
+			continue;
+		}
 		if (!part || typeof part !== 'object') {
 			continue;
 		}
 		const item = part as { type?: unknown; text?: unknown };
-		if (item.type === 'text' && typeof item.text === 'string') {
-			chunks.push(item.text);
+		if (item.type === 'text' || item.text != null) {
+			const text = toDisplayText(item.text).trim();
+			if (text) {
+				chunks.push(text);
+			}
 		}
 	}
 	const fromParts = chunks.join('\n').trim();
@@ -1816,7 +2265,10 @@ function extractMessageText(content: unknown): string {
 	if (typeof value.content === 'string') {
 		return value.content.trim();
 	}
-	return '';
+	if (value.content && typeof value.content === 'object') {
+		return extractMessageText(value.content);
+	}
+	return toDisplayText(value.text).trim();
 }
 
 async function peekLastActivityFrom(memory: any, threadId: string): Promise<{ at: number; snippet: string }> {
@@ -1881,8 +2333,9 @@ function toMs(value: unknown): number {
 
 function toolOutputText(result: unknown): string {
 	if (result && typeof result === 'object' && ('stdout' in result || 'stderr' in result)) {
-		const rec = result as { stdout?: string; stderr?: string };
-		return String(rec.stdout || rec.stderr || '');
+		const rec = result as { stdout?: unknown; stderr?: unknown };
+		return toDisplayText(rec.stdout) || toDisplayText(rec.stderr);
 	}
 	return 'user declined';
 }
+

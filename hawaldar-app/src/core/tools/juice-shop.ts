@@ -13,6 +13,9 @@ export const JUICE_SHOP_AGENT_ID = 'juice-shop';
 export const JUICE_SHOP_IMAGE = 'bkimminich/juice-shop';
 export const JUICE_SHOP_PORT = 3000;
 export const JUICE_SHOP_URL = 'http://127.0.0.1:3000';
+/** Public Juice Shop search API — bounded sqlmap / poc-request target (no payload). */
+export const JUICE_SHOP_SEARCH_URL = `${JUICE_SHOP_URL}/rest/products/search?q=test`;
+export const JUICE_SHOP_LOGIN_URL = `${JUICE_SHOP_URL}/rest/user/login`;
 export const JUICE_SHOP_CONTAINER = 'hw-juice-shop';
 const DAEMON_NAME = JUICE_SHOP_CONTAINER;
 const MEMORY_MB = 1024;

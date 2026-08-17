@@ -1,5 +1,5 @@
 import type { ListedModel, ListModelsResult } from '../preload/api';
-import { MASTRA_PROVIDERS, type ProviderInfo } from './providers';
+import { MASTRA_PROVIDERS, OPENROUTER_APP_HEADERS, OPENROUTER_MISSING_KEY, type ProviderInfo } from './providers';
 
 export type { ListedModel, ListModelsResult };
 
@@ -52,6 +52,13 @@ export async function listProviderModels(
 	const provider = MASTRA_PROVIDERS.find((item) => item.id === providerId);
 	if (!provider) {
 		return { provider: providerId, models: [], error: `Unknown provider: ${providerId}` };
+	}
+	if (providerId === 'openrouter' && !apiKey.trim()) {
+		return {
+			provider: providerId,
+			models: fallbackModels(provider),
+			error: OPENROUTER_MISSING_KEY,
+		};
 	}
 
 	const base = (baseUrl || provider.defaultBaseUrl).replace(/\/$/, '');
@@ -113,8 +120,7 @@ async function listOpenAICompatible(apiKey: string, base: string, providerId: st
 		headers.Authorization = `Bearer ${apiKey}`;
 	}
 	if (providerId === 'openrouter') {
-		headers['HTTP-Referer'] = 'https://hawaldar.local';
-		headers['X-Title'] = 'Hawaldar';
+		Object.assign(headers, OPENROUTER_APP_HEADERS);
 	}
 
 	const url = `${openaiRoot(base)}/models`;

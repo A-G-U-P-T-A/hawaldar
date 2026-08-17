@@ -1,14 +1,17 @@
+import { formatChatError } from '../chat-messages';
 import { formatScanActivityDetail, scanMetaFromResult, type ChatActivity } from '../chat-activity';
 import type { ApprovalsStore } from '../approvals-store';
 import type { FindingsStore } from '../findings-store';
-import { ensureRuntimeHitl, USER_DECLINED, type HitlAsk, type HitlToolContext } from '../hitl';
+import { definedToolResult, ensureRuntimeHitl, USER_DECLINED, type HitlAsk, type HitlToolContext } from '../hitl';
 import { evaluateToolRules, type RuleRecord, type WorkflowRecord } from '../playbook-store';
 import { fillImpliedToolTarget, parseTargetRef, rejectForbiddenTool, resolveImpliedTargets, restoreTargetPlaceholders, skipReasonForTool } from '../policy';
+import { captureProbe, coerceToolArgs, INVALID_TOOL_ARGS } from '../tool-args';
 import { isServiceStarted } from '../sandbox/podman-services';
 import type { HawaldarSettings } from '../settings';
 import { runBinwalkTool, runRadareTool } from './binary';
 import { runBrowserTool } from './browser';
 import { isIntrusiveTool, isKnowledgeTool, isServiceControlTool, TOOL_CATALOG } from './catalog';
+import { recordFingerprintFindings } from './fingerprint-findings';
 import { isFindingTool, runFindingTool } from './findings';
 import { runKnowledgeTool } from './knowledge';
 import type { KnowledgeStore } from '../knowledge';
@@ -73,7 +76,7 @@ export interface ToolInput {
 	mode?: string;
 	method?: string;
 	headers?: Record<string, string>;
-	body?: string;
+	body?: string | Record<string, unknown>;
 	payload?: string;
 	actions?: Array<{ op: string; selector?: string; value?: string; ms?: number }>;
 	vulnClass?: string;
@@ -145,10 +148,17 @@ export async function executeTool(
 	const implied = options?.impliedTargets && options.impliedTargets.length > 0
 		? options.impliedTargets
 		: resolveImpliedTargets('', settings.scope).targets;
+	const coerced = coerceToolArgs(id, input as Record<string, unknown>, implied) as ToolInput;
+	const invalidArgs = (coerced as Record<string, unknown>)[INVALID_TOOL_ARGS];
+	if (typeof invalidArgs === 'string' && invalidArgs.trim()) {
+		emitStart(id, 'invalid args');
+		emitDone(id, false, invalidArgs);
+		return { ok: false, stdout: '', stderr: invalidArgs, exitCode: 1 };
+	}
 	const filled: ToolInput = {
-		...input,
-		target: fillImpliedToolTarget(id, input.target ?? input.url, implied, settings.scope),
-		url: fillImpliedToolTarget(id, input.url ?? input.target, implied, settings.scope),
+		...coerced,
+		target: fillImpliedToolTarget(id, coerced.target ?? coerced.url, implied, settings.scope),
+		url: fillImpliedToolTarget(id, coerced.url ?? coerced.target, implied, settings.scope),
 	};
 
 	const skip = skipReasonForTool(id, filled.target ?? filled.url, implied);
@@ -159,24 +169,24 @@ export async function executeTool(
 	}
 
 	if (isKnowledgeTool(id)) {
-		emitStart(id, input.query || input.title || 'knowledge');
+		emitStart(id, coerced.query || coerced.title || 'knowledge');
 		if (!options?.knowledge) {
 			emitDone(id, false, 'Knowledge store is not ready.');
 			return { ok: false, stdout: '', stderr: 'Knowledge store is not ready.', exitCode: 1 };
 		}
-		const result = await runKnowledgeTool(options.knowledge, id, input);
-		emitDone(id, result.ok, result.ok ? (input.query || input.title || 'knowledge') : result.stderr);
+		const result = await runKnowledgeTool(options.knowledge, id, coerced);
+		emitDone(id, result.ok, result.ok ? (coerced.query || coerced.title || 'knowledge') : result.stderr);
 		return result;
 	}
 
 	if (isFindingTool(id)) {
-		const detail = input.title || input.query || input.status || 'findings';
+		const detail = coerced.title || coerced.query || coerced.status || 'findings';
 		emitStart(id, String(detail));
 		if (!options?.findings) {
 			emitDone(id, false, 'Findings store is not ready.');
 			return { ok: false, stdout: '', stderr: 'Findings store is not ready.', exitCode: 1 };
 		}
-		const result = await runFindingTool(options.findings, id, input as Record<string, unknown>, {
+		const result = await runFindingTool(options.findings, id, coerced as Record<string, unknown>, {
 			source: options.sourceAgentId,
 		});
 		emitDone(id, result.ok, result.ok ? String(detail) : result.stderr);
@@ -184,12 +194,12 @@ export async function executeTool(
 	}
 
 	if (isServiceControlTool(id)) {
-		const serviceName = typeof input.agentId === 'string' && input.agentId.trim()
-			? input.agentId.trim()
+		const serviceName = typeof coerced.agentId === 'string' && coerced.agentId.trim()
+			? coerced.agentId.trim()
 			: 'service';
 		const verb = id === 'stop_service' ? 'Stopping' : 'Starting';
 		if (id !== 'stop_service') {
-			const resolved = resolveControllableServiceId(current, input.agentId);
+			const resolved = resolveControllableServiceId(current, coerced.agentId);
 			if (resolved.ok) {
 				const gate = await ensureRuntimeHitl(current, resolved.serviceId, {
 					hitlContext: options?.hitlContext,
@@ -200,7 +210,7 @@ export async function executeTool(
 					approvals: options?.approvals,
 				});
 				if (gate.status === 'suspended') {
-					return gate.value;
+					return gate.value ?? definedToolResult('Waiting for operator approval.');
 				}
 				if (gate.status !== 'ok') {
 					emitStart(serviceName, `${verb} ${serviceName} image…`);
@@ -218,7 +228,7 @@ export async function executeTool(
 				return { ok: false, stdout: '', stderr: decision.reason, exitCode: 1 };
 			}
 		}
-		const result = await runServiceControlTool(current, id, input.agentId, options?.persist);
+		const result = await runServiceControlTool(current, id, coerced.agentId, options?.persist);
 		emitDone(serviceName, result.ok, result.ok ? `${verb} ${serviceName} image…` : result.stderr);
 		return result;
 	}
@@ -234,7 +244,7 @@ export async function executeTool(
 			approvals: options?.approvals,
 		});
 		if (gate.status === 'suspended') {
-			return gate.value;
+			return gate.value ?? definedToolResult('Waiting for operator approval.');
 		}
 		if (gate.status !== 'ok') {
 			const stderr = gate.detail || (gate.status === 'declined' ? USER_DECLINED : serviceOffMessage(agentId));
@@ -259,7 +269,7 @@ export async function executeTool(
 			askHitl: options?.askHitl,
 		});
 		if (approval.status === 'suspended') {
-			return approval.value;
+			return approval.value ?? definedToolResult('Waiting for operator approval.');
 		}
 		if (approval.status !== 'ok') {
 			const stderr = approval.detail || USER_DECLINED;
@@ -279,19 +289,30 @@ export async function executeTool(
 		}
 		if (decision.maxTimeoutMs) {
 			try {
-				const result = await withDeadline(runTool(current, id, filled, implied), decision.maxTimeoutMs);
+				const result = await finishToolResult(
+					await withDeadline(runTool(current, id, filled, implied), decision.maxTimeoutMs),
+					id,
+					filled,
+					options,
+				);
 				emitDone(id, result.ok, result.ok ? toolActivityDetail(filled, current, result) : result.stderr);
 				return result;
 			} catch (error) {
-				const stderr = error instanceof Error ? error.message : String(error);
+				const stderr = formatChatError(error);
 				emitDone(id, false, stderr);
 				return { ok: false, stdout: '', stderr, exitCode: 1 };
 			}
 		}
 	}
-	const result = await runTool(current, id, filled, implied);
-	emitDone(id, result.ok, result.ok ? toolActivityDetail(filled, current, result) : result.stderr);
-	return result;
+	try {
+		const result = await finishToolResult(await runTool(current, id, filled, implied), id, filled, options);
+		emitDone(id, result.ok, result.ok ? toolActivityDetail(filled, current, result) : result.stderr);
+		return result;
+	} catch (error) {
+		const stderr = formatChatError(error);
+		emitDone(id, false, stderr);
+		return { ok: false, stdout: '', stderr, exitCode: 1 };
+	}
 }
 
 /** Per-call approval text for intrusive tools (same HITL path as poc-* probes). */
@@ -503,7 +524,7 @@ async function runTool(settings: HawaldarSettings, id: string, input: ToolInput,
 			url: input.url ?? input.target,
 			method: input.method,
 			headers: input.headers,
-			body: input.body,
+			body: typeof input.body === 'string' ? input.body : (input.body && typeof input.body === 'object' ? JSON.stringify(input.body) : undefined),
 			payload: input.payload,
 			actions: input.actions,
 		});
@@ -516,6 +537,26 @@ async function runTool(settings: HawaldarSettings, id: string, input: ToolInput,
 
 function missing(field: string) {
 	return { ok: false, stdout: '', stderr: `${field} is required.`, exitCode: 1 };
+}
+
+async function finishToolResult(
+	result: { ok: boolean; stdout?: string; stderr?: string; exitCode?: number },
+	id: string,
+	filled: ToolInput,
+	options?: ExecuteToolOptions,
+) {
+	if (result?.ok) {
+		captureProbe(id, filled as Record<string, unknown>, result);
+		if (options?.findings) {
+			await recordFingerprintFindings(
+				options.findings,
+				id,
+				String(result.stdout || ''),
+				filled.target || filled.url || '',
+			).catch(() => 0);
+		}
+	}
+	return result;
 }
 
 function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {

@@ -14,24 +14,46 @@ Apache-2.0 plus authorized-use terms: first-run **Legal** page and **Settings �
 
 ## Setup / dev / dist
 
+From the repo root, `cd hawaldar-app` first (or run these from this folder).
+
+**Daily work:** `scripts\dev.bat` only (macOS/Linux: `./scripts/dev.sh`). It kills leftover Hawaldar/Electron, then runs `electron-vite dev`. It does not run setup, npm, typecheck, or dist.
+
+**First time** (or after deleting `node_modules`): `scripts\setup.bat` once, then `scripts\dev.bat`.
+
+**Installer:** `scripts\dist.bat` in a **separate** command after you stop dev (Ctrl+C). Never chain `setup` → `dev` → `dist`. `dev` is a blocking process, so `dist` will not run until you quit the app, and that chain is what makes Windows installs look hung.
+
 Windows:
 
 ```bat
+cd hawaldar-app
 scripts\setup.bat
 scripts\dev.bat
+```
+
+Later days:
+
+```bat
+cd hawaldar-app
+scripts\dev.bat
+```
+
+Packaged installer (only when you want an `.exe`, and only after stopping dev):
+
+```bat
+cd hawaldar-app
 scripts\dist.bat
 ```
 
 macOS / Linux:
 
 ```bash
+cd hawaldar-app
 chmod +x scripts/*.sh
 ./scripts/setup.sh
 ./scripts/dev.sh
-./scripts/dist.sh
 ```
 
-`setup` checks Node 22+, runs `npm ci` or `npm i`, then `scripts/ensure-electron.mjs` so `node_modules/electron/path.txt` exists. After `npm run dist`, electron-builder often leaves Electron uninstalled; `dist` scripts and the npm `postinstall` restore it. If `npm run dev` fails with `Error: Electron uninstall`, run `npm run ensure-electron`.
+`setup` stops leftover Hawaldar/Electron processes, runs `npm ci` (falls back to `npm i`), then `scripts/ensure-electron.mjs` so `node_modules/electron/path.txt` exists (Electron 43 has no npm postinstall; do not run ensure-electron during install). After `npm run dist`, electron-builder often leaves Electron uninstalled; `dist` scripts restore it. If `npm run dev` fails with `Error: Electron uninstall`, run `npm run ensure-electron`. `dev` skips that restore when `electron.exe` is already on disk.
 
 Equivalent npm:
 
@@ -42,7 +64,15 @@ npm run dev
 npm run dist
 ```
 
-electron-builder targets: NSIS (Windows x64; ia32 is not built), DMG + ZIP (macOS), AppImage + deb (Linux). Unsigned builds show “unknown publisher” until `CSC_LINK` (and Apple notarization env on macOS). See `../docs/releasing.html` in the public docs site.
+Do not paste those four as one chained command. `npm run dev` blocks like `dev.bat`.
+
+**Installer output** (under `hawaldar-app/release/`):
+
+- Windows: `Hawaldar Setup 0.1.0.exe` (NSIS x64; ia32 is not built)
+- macOS: `.dmg` and `.zip`
+- Linux: `.AppImage` and `.deb`
+
+Unsigned builds show “unknown publisher” until `CSC_LINK` (and Apple notarization env on macOS). See `../docs/releasing.html` in the public docs site.
 
 ## Architecture
 

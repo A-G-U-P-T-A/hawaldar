@@ -256,13 +256,28 @@ async function runVisit(settings: HawaldarSettings, id: string, input: BrowserTo
 		navTimeoutMs: Math.min(60_000, Math.max(45_000, timeoutMs(id) - 25_000)),
 	});
 	if (!result.ok) {
+		const recovered = recoverOffScopeVisit(settings, decision, result);
+		if (recovered) {
+			return recovered;
+		}
 		return result;
 	}
 	const payload = parseJson(result.stdout);
 	const finalHref = typeof payload.url === 'string' ? payload.url : decision.url;
 	const final = evaluateBrowserNavigation(settings.scope, finalHref, 'navigate');
 	if (!final.allow) {
-		return fail(final.reason);
+		const stayedRaw = typeof payload.stayedOn === 'string' && payload.stayedOn.trim()
+			? payload.stayedOn
+			: decision.url;
+		const stayed = evaluateBrowserNavigation(settings.scope, stayedRaw, 'navigate');
+		if (!stayed.allow || !stayed.url) {
+			return fail(final.reason);
+		}
+		payload.url = stayed.url;
+		payload.note = [
+			typeof payload.note === 'string' ? payload.note : '',
+			`Off-scope redirect ignored (${finalHref}). Stayed on last in-scope URL.`,
+		].filter(Boolean).join(' ');
 	}
 	if (id === 'browser-links' && Array.isArray(payload.links)) {
 		payload.links = payload.links
@@ -303,6 +318,9 @@ export function rewriteLoopbackUrl(href: string, docker: boolean): { href: strin
 	return { href: parsed.toString(), reachHostLoopback: true };
 }
 
+/** Playwright read raced a client-side navigation; transient, safe to retry once (read-only actions). */
+const TRANSIENT_NAV_RE = /execution context was destroyed|most likely because of a navigation|frame was detached/i;
+
 async function runRecon(
 	settings: HawaldarSettings,
 	id: string,
@@ -339,7 +357,7 @@ async function runRecon(
 	if (job.navTimeoutMs) {
 		args.push('--nav-timeout', String(job.navTimeoutMs));
 	}
-	const result = await podmanRun({
+	const attempt = () => podmanRun({
 		podmanPath: settings.podmanPath,
 		image: imageFor(settings, 'browser'),
 		command: 'node',
@@ -352,15 +370,21 @@ async function runRecon(
 		pidsLimit: PIDS,
 		mounts: [reconScriptMount(settings)],
 	});
+	let result = await attempt();
+	if (transientNavFailure(result)) {
+		result = await attempt();
+	}
 	if (result.timedOut) {
 		return fail('Browser visit timed out.');
 	}
 	const payload = parseJson(result.stdout);
 	if (payload.ok === false) {
-		return fail(typeof payload.error === 'string' ? payload.error : (result.stderr || 'Browser visit failed.'));
+		const message = typeof payload.error === 'string' ? payload.error : (result.stderr || 'Browser visit failed.');
+		return fail(TRANSIENT_NAV_RE.test(message) ? 'Page navigated during the read; retry browser-open.' : message);
 	}
 	if (result.exitCode !== 0 && payload.ok !== true) {
-		return fail(result.stderr || result.stdout || `exit ${result.exitCode}`);
+		const raw = result.stderr || result.stdout || `exit ${result.exitCode}`;
+		return fail(TRANSIENT_NAV_RE.test(raw) ? 'Page navigated during the read; retry browser-open.' : raw);
 	}
 	return {
 		ok: true,
@@ -370,6 +394,14 @@ async function runRecon(
 		source: BUILTIN_SOURCE,
 		tool: id,
 	};
+}
+
+function transientNavFailure(result: { stdout: string; stderr: string }): boolean {
+	if (TRANSIENT_NAV_RE.test(result.stderr)) {
+		return true;
+	}
+	const payload = parseJson(result.stdout);
+	return payload.ok === false && typeof payload.error === 'string' && TRANSIENT_NAV_RE.test(payload.error);
 }
 
 function parseJson(text: string): Record<string, any> {
@@ -392,6 +424,39 @@ function parseJson(text: string): Record<string, any> {
 		}
 		return { raw: trimmed.slice(0, 2_000) };
 	}
+}
+
+function recoverOffScopeVisit(
+	settings: HawaldarSettings,
+	start: { url?: string },
+	result: { stdout: string; stderr: string },
+) {
+	const blob = `${result.stderr || ''} ${result.stdout || ''}`;
+	if (!/Redirect refused|redirect left the allow-list|not on the allow-list/i.test(blob)) {
+		return undefined;
+	}
+	const stayed = start.url ? evaluateBrowserNavigation(settings.scope, start.url, 'navigate') : { allow: false as const };
+	if (!stayed.allow || !stayed.url) {
+		return undefined;
+	}
+	const payload = parseJson(result.stdout);
+	return {
+		ok: true,
+		stdout: JSON.stringify({
+			ok: true,
+			action: payload.action || 'open',
+			title: typeof payload.title === 'string' ? payload.title : '',
+			url: stayed.url,
+			status: typeof payload.status === 'number' ? payload.status : 0,
+			excerpt: typeof payload.excerpt === 'string' ? payload.excerpt : '',
+			note: `Off-scope redirect ignored. Stayed on last in-scope URL ${stayed.url}.`,
+			stayedOn: stayed.url,
+		}, null, 2).slice(0, 20_000),
+		stderr: '',
+		exitCode: 0,
+		source: BUILTIN_SOURCE,
+		tool: 'browser-open',
+	};
 }
 
 function fail(stderr: string) {

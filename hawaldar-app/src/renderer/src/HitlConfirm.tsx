@@ -20,23 +20,21 @@ const KIND_KEY: Record<HitlKind, string> = {
 
 export default function HitlConfirm({ title, explanation, kind, serviceId, busy = false, onCancel, onApprove }: Props) {
 	const { t } = useI18n();
+	const kindKey = kind && KIND_KEY[kind];
+	const heading = typeof title === 'string' ? title : String(title ?? 'Approval required');
+	const body = typeof explanation === 'string' ? explanation : String(explanation ?? '');
+
 	useEffect(() => {
 		const onKey = (event: KeyboardEvent) => {
-			if (busy) {
+			if (busy || event.key !== 'Escape') {
 				return;
 			}
-			if (event.key === 'Escape') {
-				event.preventDefault();
-				onCancel();
-			}
-			if (event.key === 'Enter') {
-				event.preventDefault();
-				onApprove();
-			}
+			event.preventDefault();
+			onCancel();
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
-	}, [busy, onCancel, onApprove]);
+	}, [busy, onCancel]);
 
 	return (
 		<div className="quit-overlay" role="presentation">
@@ -50,15 +48,15 @@ export default function HitlConfirm({ title, explanation, kind, serviceId, busy 
 					<div className="hitl-head-text">
 						<div className="hitl-eyebrow">
 							{t('hitl.approvalRequired')}
-							{kind ? <span className={`hitl-kind hitl-kind-${kind}`}>{t(KIND_KEY[kind])}</span> : null}
+							{kindKey ? <span className={`hitl-kind hitl-kind-${kind}`}>{t(kindKey)}</span> : null}
 							{serviceId ? <code className="hitl-service">{serviceId}</code> : null}
 						</div>
 						<h2 className="quit-copy" id="hitl-title">
-							{title}
+							{heading}
 						</h2>
 					</div>
 				</div>
-				<p className="widget-help">{explanation}</p>
+				<p className="widget-help">{body}</p>
 				<div className="widget-foot">
 					<button type="button" className="btn" disabled={busy} onClick={onCancel}>
 						{t('hitl.decline')}

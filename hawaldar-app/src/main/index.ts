@@ -1,9 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChatActivity } from '../core/chat-activity';
 import { emptyChatFallback, formatChatError } from '../core/chat-messages';
+import { loadDotenvFiles } from '../core/env-files';
 import { HawaldarRuntime } from '../core/runtime';
 import { toEpochMs } from '../core/session-meta';
 import { SettingsStore } from '../core/settings';
@@ -23,15 +25,27 @@ import { persistRuntimeFromStatus, readRuntimeState } from '../core/sandbox/runt
 import { autoStartMachineIfEnabled, buildPodmanStatus, startToolService, stopToolService } from '../core/sandbox/podman-services';
 import { extractCanonicalTarget, looksLikeLocalPath, messageImpliesLocalMachine } from '../core/policy';
 import { resolveWorkflowRef, takeLeadingSlashCommand } from '../core/engagement';
+import { MASTRA_PROVIDERS, resolveProviderApiKey } from '../core/providers';
+import { isResumeIntent } from '../core/stream-text';
 import { AGENT_ROLES, TOOL_CATALOG } from '../core/tools/catalog';
 import { checkToolReadiness, formatReadinessMarkdown } from '../core/tools/readiness';
-import { MASTRA_PROVIDERS } from '../core/providers';
 import { listProviderModels } from '../core/model-catalog';
 import type { ChatHistoryQuery, ChatRequest, HitlAskEvent, ListModelsRequest, NoteWrite, PromptsWrite, RuleWrite, SettingsWrite, TaskListWrite, TaskMove, TaskStatus, TaskTagWrite, TaskWrite, WorkflowWrite } from '../preload/api';
 import type { HitlAsk } from '../core/hitl';
+import { releaseHitlWaiter } from '../core/hitl-gate';
 import { PODMAN_MACHINE_SUBJECT } from '../core/approvals-store';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+process.on('uncaughtException', (error) => {
+	console.error('[hawaldar] uncaughtException', error);
+});
+process.on('unhandledRejection', (reason) => {
+	console.error('[hawaldar] unhandledRejection', reason);
+});
+process.on('uncaughtExceptionMonitor', (error) => {
+	console.error('[hawaldar] uncaughtExceptionMonitor', error);
+});
 
 function resourcesRoot(): string {
 	if (app.isPackaged) {
@@ -46,6 +60,13 @@ function brandIconPath(): string {
 
 if (process.platform === 'win32') {
 	app.setAppUserModelId('com.hawaldar.app');
+	// Electron 43 + Windows: GPU-process / GPU-sandbox crashes take down Chromium's
+	// network service. loadURL(ELECTRON_RENDERER_URL) then never finishes and the
+	// window stays blank. These switches must be set before app.whenReady().
+	app.disableHardwareAcceleration();
+	app.commandLine.appendSwitch('disable-gpu-sandbox');
+	app.commandLine.appendSwitch('in-process-gpu');
+	app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -55,6 +76,21 @@ let runtime: HawaldarRuntime;
 type QuitPhase = 'idle' | 'asking' | 'tearing-down' | 'confirmed';
 let quitPhase: QuitPhase = 'idle';
 const pendingHitl = new Map<string, { resolve: (approved: boolean) => void }>();
+
+function sendToRenderer(channel: string, payload?: unknown): void {
+	if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+		return;
+	}
+	try {
+		if (payload === undefined) {
+			mainWindow.webContents.send(channel);
+		} else {
+			mainWindow.webContents.send(channel, payload);
+		}
+	} catch (error) {
+		console.error('[hawaldar] send failed', channel, error);
+	}
+}
 
 function declineAllHitl(): void {
 	for (const pending of pendingHitl.values()) {
@@ -78,7 +114,13 @@ function askRendererHitl(sender: WebContents | undefined, req: HitlAsk): Promise
 			return;
 		}
 		pendingHitl.set(requestId, { resolve });
-		sender.send('hitl.ask', payload);
+		try {
+			sender.send('hitl.ask', payload);
+		} catch (error) {
+			console.error('[hawaldar] hitl.ask send', error);
+			pendingHitl.delete(requestId);
+			resolve(false);
+		}
 	});
 }
 
@@ -314,7 +356,21 @@ function bindStandardEditShortcuts(win: BrowserWindow): void {
 	});
 }
 
+function preloadScript(): string {
+	const bundled = path.join(__dirname, '../preload/index.mjs');
+	if (existsSync(bundled)) {
+		return bundled;
+	}
+	return path.join(__dirname, '../preload/index.js');
+}
+
+function isRendererDev(): boolean {
+	return Boolean(process.env.ELECTRON_RENDERER_URL);
+}
+
 function createWindow(): void {
+	const preload = preloadScript();
+	console.log('[hawaldar] preload', preload);
 	mainWindow = new BrowserWindow({
 		width: 1280,
 		height: 840,
@@ -323,6 +379,7 @@ function createWindow(): void {
 		title: 'Hawaldar',
 		icon: brandIconPath(),
 		backgroundColor: '#1e1e1e',
+		show: false,
 		autoHideMenuBar: true,
 		titleBarStyle: 'hidden',
 		titleBarOverlay: {
@@ -331,35 +388,94 @@ function createWindow(): void {
 			height: 36,
 		},
 		webPreferences: {
-			preload: path.join(__dirname, '../preload/index.mjs'),
+			preload,
 			contextIsolation: true,
 			nodeIntegration: false,
+			// electron-vite emits ESM preload (index.mjs). Chromium's renderer
+			// sandbox cannot load that, so contextBridge never runs and
+			// window.hawaldar is missing — React then crashes into a blank window.
 			sandbox: false,
+			backgroundThrottling: false,
 		},
 	});
 
+	const win = mainWindow;
+	win.center();
+	let shown = false;
+	const reveal = (reason: string) => {
+		if (shown || win.isDestroyed()) {
+			return;
+		}
+		shown = true;
+		console.log(`[hawaldar] showing window (${reason})`);
+		win.center();
+		win.show();
+		win.focus();
+	};
+
+	win.once('ready-to-show', () => reveal('ready-to-show'));
+	setTimeout(() => {
+		if (!shown) {
+			console.warn('[hawaldar] window still hidden after 8s; showing anyway');
+			reveal('timeout');
+		}
+	}, 8_000);
+	win.webContents.on('did-finish-load', () => {
+		console.log('[hawaldar] did-finish-load', win.webContents.getURL());
+	});
+	win.webContents.on('did-fail-load', (_event, code, desc, url, isMainFrame) => {
+		console.error('[hawaldar] did-fail-load', { code, desc, url, isMainFrame });
+		reveal('did-fail-load');
+	});
+	win.webContents.on('render-process-gone', (_event, details) => {
+		console.error('[hawaldar] render-process-gone', details);
+	});
+	win.webContents.on('preload-error', (_event, preloadPath, error) => {
+		console.error('[hawaldar] preload-error', preloadPath, error);
+	});
+	win.webContents.on('console-message', (event) => {
+		const level = typeof event.level === 'number' ? event.level : -1;
+		const message = String(event.message || '');
+		if (level >= 2) {
+			console.error('[renderer]', message, event.lineNumber ? `${event.sourceId}:${event.lineNumber}` : '');
+		}
+	});
+	if (isRendererDev()) {
+		win.webContents.openDevTools({ mode: 'detach' });
+	}
+
 	const menu = Menu.getApplicationMenu();
 	if (menu) {
-		mainWindow.setMenu(menu);
+		win.setMenu(menu);
 	}
-	bindStandardEditShortcuts(mainWindow);
-	mainWindow.webContents.on('context-menu', (event) => {
+	bindStandardEditShortcuts(win);
+	win.webContents.on('context-menu', (event) => {
 		event.preventDefault();
 	});
-	mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+	win.webContents.setWindowOpenHandler(({ url }) => {
 		if (/^https?:\/\//i.test(url)) {
 			void shell.openExternal(url);
 		}
 		return { action: 'deny' };
 	});
 
-	if (process.env.ELECTRON_RENDERER_URL) {
-		void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+	const rendererUrl = process.env.ELECTRON_RENDERER_URL;
+	if (rendererUrl) {
+		console.log('[hawaldar] loadURL', rendererUrl);
+		void win.loadURL(rendererUrl).catch((error) => {
+			console.error('[hawaldar] loadURL failed', error);
+			reveal('loadURL-error');
+		});
 	} else {
-		void mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+		const html = path.join(__dirname, '../renderer/index.html');
+		console.log('[hawaldar] loadFile', html);
+		void win.loadFile(html).catch((error) => {
+			console.error('[hawaldar] loadFile failed', error);
+			reveal('loadFile-error');
+		});
 	}
 
-	mainWindow.on('close', (event) => {
+	win.on('close', (event) => {
 		if (quitPhase === 'confirmed') {
 			return;
 		}
@@ -367,16 +483,38 @@ function createWindow(): void {
 		requestQuitConfirm();
 	});
 
-	mainWindow.on('closed', () => {
+	win.on('closed', () => {
 		mainWindow = null;
 	});
 }
 
 function registerIpc(): void {
 	ipcMain.handle('chat.stream', async (event, req: ChatRequest) => {
+		const requestId = randomUUID();
+		const sendDelta = (delta: string) => {
+			if (event.sender.isDestroyed()) {
+				return;
+			}
+			try {
+				event.sender.send('chat.delta', { requestId, delta });
+			} catch (error) {
+				console.error('[hawaldar] chat.delta send', error);
+			}
+		};
+		const fail = (error: unknown, threadId?: string) => {
+			const message = formatChatError(error);
+			console.error('[hawaldar] chat.stream', message);
+			sendDelta(message);
+			return {
+				requestId,
+				text: message,
+				...(threadId ? { threadId } : {}),
+				error: message,
+			};
+		};
+		try {
 		await requireLegal();
 		await runtime.ready;
-		const requestId = randomUUID();
 		const thread = await runtime.beginChat(req.threadId);
 		await runtime.touchThread(thread.id, (req.prompt || '').trim());
 		const commands = chatCommands(req);
@@ -395,11 +533,15 @@ function registerIpc(): void {
 			prompt = 'Run the selected recon tool. Use a named host, local/this machine → 127.0.0.1, or Settings → Scope if set. Empty scope does not block a named or local target.';
 		}
 
-		const sendDelta = (delta: string) => {
-			event.sender.send('chat.delta', { requestId, delta });
-		};
 		const sendActivity = (activity: ChatActivity) => {
-			event.sender.send('chat.activity', { requestId, ...activity });
+			if (event.sender.isDestroyed()) {
+				return;
+			}
+			try {
+				event.sender.send('chat.activity', { requestId, ...activity });
+			} catch (error) {
+				console.error('[hawaldar] chat.activity send', error);
+			}
 		};
 
 		const finish = (text: string, extra?: { error?: string; threadId?: string }) => ({
@@ -409,7 +551,7 @@ function registerIpc(): void {
 			...(extra?.error ? { error: extra.error } : {}),
 		});
 
-		return runtime.withActivity(sendActivity, () => runtime.withHitl(
+		return await runtime.withActivity(sendActivity, () => runtime.withHitl(
 			(req) => askRendererHitl(event.sender, req),
 			async () => {
 			try {
@@ -516,7 +658,7 @@ function registerIpc(): void {
 							message: target || 'Inspect engagement state',
 							portRange: canonical?.port ? String(canonical.port) : undefined,
 						};
-				const output = await runtime.runWorkflow(workflowKey, input);
+				const output = await runtime.runWorkflow(workflowKey, input, { threadId: thread.id });
 				const text = '```\n' + output + '\n```';
 				sendDelta(text);
 				return finish(text);
@@ -539,7 +681,7 @@ function registerIpc(): void {
 							message: rest || 'Inspect engagement state',
 							portRange: canonical?.port ? String(canonical.port) : undefined,
 						};
-				const output = await runtime.runWorkflow(workflowFromPrompt.id, input);
+				const output = await runtime.runWorkflow(workflowFromPrompt.id, input, { threadId: thread.id });
 				const text = '```\n' + output + '\n```';
 				sendDelta(text);
 				return finish(text);
@@ -550,6 +692,15 @@ function registerIpc(): void {
 				const text = `Ask the Orchestrator, or use a slash command (${cmds}, …).`;
 				sendDelta(text);
 				return finish(text);
+			}
+
+			if (isResumeIntent(prompt)) {
+				const resumed = await runtime.tryResumeEngagement(thread.id);
+				if (resumed != null) {
+					const text = '```\n' + resumed + '\n```';
+					sendDelta(text);
+					return finish(text);
+				}
 			}
 
 			const specialists = commands.filter((item) => SPECIALISTS.has(item));
@@ -574,12 +725,13 @@ function registerIpc(): void {
 			}
 			return finish(text);
 			} catch (error) {
-				const message = formatChatError(error);
-				sendDelta(message);
-				return finish(message, { error: message });
+				return fail(error, thread.id);
 			}
 			},
 		));
+		} catch (error) {
+			return fail(error);
+		}
 	});
 
 	ipcMain.handle('chat.history', async (_e, sessionId: string, query: ChatHistoryQuery = {}) => {
@@ -587,17 +739,24 @@ function registerIpc(): void {
 		return runtime.listThreadHistory(sessionId, {
 			limit: query.limit,
 			before: query.before,
+			beforeId: query.beforeId,
 		});
 	});
 
 	ipcMain.handle('workflow.run', async (_e, key: string, input: Record<string, unknown>) => {
-		await requireLegal();
-		await runtime.ready;
-		const sender = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : undefined;
-		return runtime.withHitl(
-			(req) => askRendererHitl(sender, req),
-			() => runtime.runWorkflow(key, input),
-		);
+		try {
+			await requireLegal();
+			await runtime.ready;
+			const sender = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : undefined;
+			return await runtime.withHitl(
+				(req) => askRendererHitl(sender, req),
+				() => runtime.runWorkflow(key, input, { threadId: runtime.activeThreadId }),
+			);
+		} catch (error) {
+			const message = formatChatError(error);
+			console.error('[hawaldar] workflow.run', message);
+			throw new Error(message);
+		}
 	});
 
 	ipcMain.handle('findings.list', async () => {
@@ -635,7 +794,9 @@ function registerIpc(): void {
 			return { ok: false };
 		}
 		pendingHitl.delete(id);
-		pending.resolve(req?.approved === true);
+		// Return from this invoke before the probe continues. Resolving inline
+		// ran sqlmap/poc/resume inside the IPC stack and killed Electron.
+		releaseHitlWaiter(pending.resolve, req?.approved === true);
 		return { ok: true };
 	});
 
@@ -671,7 +832,7 @@ function registerIpc(): void {
 				virtHint: host.virtHint,
 			},
 			alternatives: listEngineAlternatives(s.containerEngine, s.podmanPath),
-			hasApiKey: Boolean(s.apiKey),
+			hasApiKey: Boolean(resolveProviderApiKey(s.provider, s.apiKey)),
 			hasSelectedProvider: s.hasSelectedProvider === true,
 			thinking: s.thinking === true,
 			sessionTtlDays: s.sessionTtlDays,
@@ -1150,7 +1311,9 @@ function registerIpc(): void {
 	ipcMain.handle('providers.listModels', async (_e, req: ListModelsRequest = {}) => {
 		const settings = await store.read();
 		const provider = req.provider || settings.provider;
-		const apiKey = req.apiKey !== undefined && req.apiKey !== '' ? req.apiKey : settings.apiKey;
+		const apiKey = req.apiKey !== undefined && req.apiKey !== ''
+			? req.apiKey
+			: resolveProviderApiKey(provider, settings.apiKey);
 		const baseUrl = req.baseUrl !== undefined && req.baseUrl !== '' ? req.baseUrl : settings.baseUrl;
 		return listProviderModels(provider, apiKey, baseUrl, req.fresh === true);
 	});
@@ -1306,20 +1469,18 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+	console.log('[hawaldar] app ready');
 	if (process.platform === 'darwin') {
 		app.dock?.setIcon(brandIconPath());
 	}
 	store = new SettingsStore(resourcesRoot());
+	loadDotenvFiles([store.extensionPath, path.dirname(store.extensionPath), path.join(store.extensionPath, '..')]);
 	runtime = new HawaldarRuntime(store);
 	runtime.onEngagement((run) => {
-		if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-			mainWindow.webContents.send('engagement.event', run);
-		}
+		sendToRenderer('engagement.event', run);
 	});
 	runtime.onFindingsChanged(() => {
-		if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-			mainWindow.webContents.send('findings.changed');
-		}
+		sendToRenderer('findings.changed');
 	});
 	registerIpc();
 	installApplicationMenu();

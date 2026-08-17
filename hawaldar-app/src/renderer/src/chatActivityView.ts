@@ -1,4 +1,5 @@
 import type { ChatActivityEvent } from '../../preload/api';
+import { toDisplayText } from './displayText';
 import { TOOL_CATALOG } from './toolMeta';
 
 export interface ActivityStep {
@@ -16,21 +17,34 @@ export function lastIndexWhere<T>(items: T[], pred: (item: T) => boolean): numbe
 	return -1;
 }
 
+/** Weak detail (empty / placeholder) must never overwrite a good one. */
+function isWeakActivityDetail(text: string): boolean {
+	const t = text.trim();
+	return !t || /^unknown error$/i.test(t) || t === '[object Object]' || t === '{}' || t === '[]';
+}
+
 function preferActivityDetail(incoming: string, existing: string): string {
+	if (isWeakActivityDetail(incoming)) return existing;
+	if (isWeakActivityDetail(existing)) return incoming;
 	if (incoming.includes('://') && !existing.includes('://')) return incoming;
 	if (/:\d+/.test(incoming) && !/:\d+/.test(existing)) return incoming;
 	return incoming || existing;
 }
 
 export function applyActivity(steps: ActivityStep[], ev: ChatActivityEvent): ActivityStep[] {
+	if (!ev || typeof ev !== 'object') {
+		return steps;
+	}
+	const name = typeof ev.name === 'string' && ev.name ? ev.name : 'tool';
 	const next = steps.slice();
+	const detail = ev.detail ? toDisplayText(ev.detail) : '';
 	if (ev.type === 'agent') {
-		if (next.some((step) => step.type === 'agent' && step.name === ev.name)) return next;
+		if (next.some((step) => step.type === 'agent' && step.name === name)) return next;
 		next.push({
-			id: `agent-${ev.name}`,
+			id: `agent-${name}`,
 			type: 'agent',
-			name: ev.name,
-			detail: ev.detail || ev.name,
+			name,
+			detail: detail || name,
 			status: 'ok',
 		});
 		return next;
@@ -40,72 +54,73 @@ export function applyActivity(steps: ActivityStep[], ev: ChatActivityEvent): Act
 		next.push({
 			id: `text-${next.length}`,
 			type: 'text',
-			name: ev.name,
-			detail: ev.detail,
+			name,
+			detail,
 			status: 'text',
 		});
 		return next;
 	}
 	if (ev.type === 'tool:start') {
-		const idx = lastIndexWhere(next, (step) => step.name === ev.name);
+		const idx = lastIndexWhere(next, (step) => step.name === name);
 		if (idx >= 0) {
-			next[idx] = { ...next[idx], type: ev.type, detail: preferActivityDetail(ev.detail, next[idx].detail), status: 'start' };
+			next[idx] = { ...next[idx], type: ev.type, detail: preferActivityDetail(detail, next[idx].detail), status: 'start' };
 			return next;
 		}
 		next.push({
-			id: `${ev.name}-${next.length}`,
+			id: `${name}-${next.length}`,
 			type: ev.type,
-			name: ev.name,
-			detail: ev.detail,
+			name,
+			detail,
 			status: ev.status,
 		});
 		return next;
 	}
-	const idx = lastIndexWhere(next, (step) => step.name === ev.name);
+	const idx = lastIndexWhere(next, (step) => step.name === name);
 	if (idx >= 0) {
 		next[idx] = {
 			...next[idx],
 			type: 'tool:done',
-			detail: preferActivityDetail(ev.detail, next[idx].detail),
+			detail: preferActivityDetail(detail, next[idx].detail),
 			status: ev.status,
 		};
 		return next;
 	}
 	next.push({
-		id: `${ev.name}-${next.length}`,
+		id: `${name}-${next.length}`,
 		type: ev.type,
-		name: ev.name,
-		detail: ev.detail,
+		name,
+		detail,
 		status: ev.status,
 	});
 	return next;
 }
 
 export function formatActivityLine(step: ActivityStep): string {
-	const starting = /^Starting /i.test(step.detail) || /^Stopping /i.test(step.detail);
+	const detail = isWeakActivityDetail(step.detail) ? '' : step.detail;
+	const starting = /^Starting /i.test(detail) || /^Stopping /i.test(detail);
 	if (step.status === 'error') {
-		if (step.detail) {
-			return step.detail.includes(step.name) ? step.detail : `${step.name}: ${step.detail}`;
+		if (detail) {
+			return detail.includes(step.name) ? detail : `${step.name}: ${detail}`;
 		}
 		return `${step.name} failed`;
 	}
 	if (starting) {
 		if (step.status === 'ok') {
-			return /^Stopping /i.test(step.detail) ? `${step.name} stopped` : `${step.name} image ready`;
+			return /^Stopping /i.test(detail) ? `${step.name} stopped` : `${step.name} image ready`;
 		}
-		return step.detail;
+		return detail;
 	}
-	if (step.detail.startsWith('delegate →')) {
-		return step.detail;
+	if (detail.startsWith('delegate →')) {
+		return detail;
 	}
 	if (step.status === 'ok') {
-		if (step.detail && !/^Starting /i.test(step.detail) && !/^Stopping /i.test(step.detail)) {
-			return step.detail.includes(step.name) ? step.detail : `${step.name} → ${step.detail}`;
+		if (detail) {
+			return detail.includes(step.name) ? detail : `${step.name} → ${detail}`;
 		}
 		return `${step.name} finished`;
 	}
-	if (step.detail) {
-		return `${step.name} → ${step.detail}`;
+	if (detail) {
+		return `${step.name} → ${detail}`;
 	}
 	return step.name;
 }

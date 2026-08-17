@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import MarkdownBody from './MarkdownBody';
+import { toDisplayText } from './displayText';
+import { restoreRedactedAddresses } from './keepAddresses';
 import {
 	findingBadgeFromStep,
 	formatActivityLine,
@@ -126,13 +128,18 @@ function looksLikeOutput(text: string): boolean {
 	return false;
 }
 
+function firstLine(text: string, max = 140): string {
+	const line = text.split('\n')[0].trim();
+	return line.length > max ? `${line.slice(0, max)}…` : line;
+}
+
 function ToolRow({ step }: { step: ActivityStep }) {
 	const phaseId = workflowPhaseId(step);
 	const approval = isApprovalWaitStep(step);
-	const detail = step.detail.trim();
+	const detail = step.detail ? restoreRedactedAddresses(toDisplayText(step.detail)).trim() : '';
 	const expandable = !phaseId && !approval && looksLikeOutput(detail);
-	const line = formatActivityLine(step);
-	const title = phaseId ? phaseLabel(phaseId) : line;
+	const line = formatActivityLine({ ...step, detail });
+	const title = phaseId ? phaseLabel(phaseId) : expandable ? firstLine(line) : line;
 
 	const head = (
 		<>
@@ -182,7 +189,7 @@ function memoryPreview(detail: string): string[] {
 }
 
 export function MemoryCard({ step }: { step: ActivityStep }) {
-	const detail = step.detail.trim();
+	const detail = step.detail ? restoreRedactedAddresses(toDisplayText(step.detail)).trim() : '';
 	const preview = memoryPreview(detail);
 	return (
 		<div className={`memory-card${step.status === 'start' ? ' is-running' : ''}`}>
@@ -217,6 +224,7 @@ const SEV_LABEL: Record<FindingBadge['severity'], string> = {
 export function FindingLine({ step, onOpenFindings }: { step: ActivityStep; onOpenFindings?: () => void }) {
 	const badge = findingBadgeFromStep(step);
 	if (!badge) return null;
+	const title = restoreRedactedAddresses(badge.title);
 	return (
 		<div className={`finding-line sev-${badge.severity}${step.status === 'error' ? ' is-error' : ''}`}>
 			<span className="finding-line-icon" aria-hidden><IconFlag /></span>
@@ -224,7 +232,7 @@ export function FindingLine({ step, onOpenFindings }: { step: ActivityStep; onOp
 				<span className="finding-line-dot" aria-hidden />
 				{SEV_LABEL[badge.severity]}
 			</span>
-			<span className="finding-line-title" title={badge.title}>{badge.title}</span>
+			<span className="finding-line-title" title={title}>{title}</span>
 			{onOpenFindings ? (
 				<button
 					type="button"
@@ -238,5 +246,3 @@ export function FindingLine({ step, onOpenFindings }: { step: ActivityStep; onOp
 		</div>
 	);
 }
-
-export { isMemoryStep, isFindingRecordStep, isWorkflowStep, isApprovalWaitStep };

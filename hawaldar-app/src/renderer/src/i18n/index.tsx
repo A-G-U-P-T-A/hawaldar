@@ -51,7 +51,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 	const [locale, setLocaleState] = useState<Locale>('en');
 
 	useEffect(() => {
-		void window.hawaldar.getSettings()
+		void window.hawaldar?.getSettings()
 			.then((settings) => {
 				if (isLocale(settings.locale)) {
 					setLocaleState(settings.locale);
@@ -64,7 +64,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 	const setLocale = useCallback((next: Locale) => {
 		setLocaleState(next);
 		document.documentElement.lang = next;
-		void window.hawaldar.saveSettings({ locale: next }).catch(() => undefined);
+		void window.hawaldar?.saveSettings({ locale: next }).catch(() => undefined);
 	}, []);
 
 	const t = useCallback(

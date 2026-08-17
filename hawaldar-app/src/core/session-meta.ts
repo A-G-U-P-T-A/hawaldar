@@ -1,5 +1,10 @@
 import { createClient, type Client } from '@libsql/client';
 import { dataHomePaths, ensureDataHome, sqliteFileUrl } from './data-home';
+import {
+	parseEngagementCheckpoint,
+	serializeEngagementCheckpoint,
+	type EngagementCheckpoint,
+} from './engagement-checkpoint';
 
 export interface SessionMeta {
 	id: string;
@@ -115,6 +120,39 @@ export class SessionMetaStore {
 		});
 	}
 
+	async getEngagement(threadId: string): Promise<EngagementCheckpoint | undefined> {
+		await this.ready;
+		const key = threadId.trim();
+		if (!key) {
+			return undefined;
+		}
+		try {
+			const rs = await this.client.execute({
+				sql: 'SELECT engagement FROM session_meta WHERE id = ?',
+				args: [key],
+			});
+			return parseEngagementCheckpoint(rs.rows[0]?.engagement);
+		} catch {
+			return undefined;
+		}
+	}
+
+	async setEngagement(threadId: string, checkpoint: EngagementCheckpoint | undefined): Promise<void> {
+		const id = threadId.trim();
+		if (!id) {
+			return;
+		}
+		await this.ready;
+		const current = await this.get(id);
+		if (!current) {
+			await this.upsert({ id, touch: true });
+		}
+		await this.client.execute({
+			sql: `UPDATE session_meta SET engagement = ?, updatedAt = ? WHERE id = ?`,
+			args: [checkpoint ? serializeEngagementCheckpoint(checkpoint) : null, Date.now(), id],
+		});
+	}
+
 	private async init(): Promise<void> {
 		await this.client.execute(`
 			CREATE TABLE IF NOT EXISTS session_meta (
@@ -133,6 +171,11 @@ export class SessionMetaStore {
 		}
 		try {
 			await this.client.execute('ALTER TABLE session_meta ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0');
+		} catch {
+			/* already present */
+		}
+		try {
+			await this.client.execute('ALTER TABLE session_meta ADD COLUMN engagement TEXT');
 		} catch {
 			/* already present */
 		}

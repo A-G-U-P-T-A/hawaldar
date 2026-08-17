@@ -1,36 +1,14 @@
 import { isValidElement, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { toDisplayText } from './displayText';
+import { restoreRedactedAddresses } from './keepAddresses';
 
 interface Props {
 	text: string;
 	className?: string;
 	/** Loopback / host-gateway / in-scope addresses that must stay visible if the model redacts them. */
 	keepAddresses?: string[];
-}
-
-const REDACTED_IP = /\[IP_ADDRESS\]/g;
-
-/** Do not treat loopback or the scanned host-gateway as secrets. */
-export function isKeptScanAddress(value: string): boolean {
-	const v = value.trim().toLowerCase();
-	if (!v) return false;
-	if (v === '127.0.0.1' || v === '::1' || v === 'localhost') return true;
-	if (v === 'host.containers.internal' || v === 'host.docker.internal') return true;
-	if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v)) return true;
-	if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v)) return true;
-	if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(v)) return true;
-	if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(v)) return true;
-	return false;
-}
-
-export function restoreRedactedAddresses(text: string, keep: string[] = []): string {
-	const addresses = keep.filter((item) => item.trim() && isKeptScanAddress(item));
-	if (!addresses.length || !text.includes('[IP_ADDRESS]')) {
-		return text;
-	}
-	let i = 0;
-	return text.replace(REDACTED_IP, () => addresses[Math.min(i++, addresses.length - 1)] ?? addresses[0]);
 }
 
 function safeHref(href?: string): string {
@@ -99,7 +77,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
 }
 
 export default function MarkdownBody({ text, className = '', keepAddresses = [] }: Props) {
-	const body = restoreRedactedAddresses(text, keepAddresses);
+	const body = restoreRedactedAddresses(toDisplayText(text), keepAddresses);
 	return (
 		<div className={`md ${className}`.trim()}>
 			<ReactMarkdown

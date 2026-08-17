@@ -248,10 +248,14 @@ export function useWorkspaceTabs() {
 		let cancelled = false;
 		void (async () => {
 			try {
+				const api = window.hawaldar;
+				if (!api) {
+					return;
+				}
 				const [threads, notes, tasks] = await Promise.all([
-					window.hawaldar.listThreads(),
-					window.hawaldar.listNotes(),
-					window.hawaldar.listTasks(),
+					api.listThreads(),
+					api.listNotes(),
+					api.listTasks(),
 				]);
 				if (cancelled) {
 					return;

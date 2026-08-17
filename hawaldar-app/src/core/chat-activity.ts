@@ -1,5 +1,8 @@
-import { formatChatError } from './chat-messages';
+import { formatChatError, toDisplayText } from './chat-messages';
+import { appendStreamDelta, extractStreamTextDelta } from './stream-text';
 import { parseHitlSuspendPayload, type HitlSuspendPayload } from './hitl';
+import { restoreTargetPlaceholders } from './policy';
+import { currentToolContext } from './tool-context';
 
 export type ChatActivityType = 'tool:start' | 'tool:done' | 'text' | 'agent';
 export type ChatActivityStatus = 'start' | 'ok' | 'error' | 'text';
@@ -39,31 +42,78 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 const MEMORY_DETAIL_CLIP = 1200;
 
+/** Model args may carry the provider's `[IP_ADDRESS]` token; operator rows always show the real address. */
+function restoreArgText(value: string): string {
+	return restoreTargetPlaceholders(value, currentToolContext()?.impliedTargets ?? []).trim();
+}
+
 export function activityDetailFromArgs(args: unknown, toolName?: string): string {
 	const rec = asRecord(args);
 	if (!rec) {
 		return '';
 	}
 	if (toolName === 'finding-record') {
-		const title = typeof rec.title === 'string' ? rec.title.trim() : '';
+		const title = typeof rec.title === 'string' ? restoreArgText(rec.title) : '';
 		const severity = typeof rec.severity === 'string' ? rec.severity.trim().toLowerCase() : '';
 		if (title) {
 			return severity ? `${severity} · ${title}` : title;
 		}
 	}
-	if (toolName === 'updateWorkingMemory' && typeof rec.memory === 'string') {
-		const memory = rec.memory.trim();
+	if ((toolName === 'updateWorkingMemory' || toolName === 'update-working-memory') && typeof rec.memory === 'string') {
+		const memory = restoreArgText(rec.memory);
 		return memory.length > MEMORY_DETAIL_CLIP ? `${memory.slice(0, MEMORY_DETAIL_CLIP)}…` : memory;
 	}
 	for (const key of ['url', 'target', 'filePath', 'pcapPath', 'workflowId', 'agentId', 'module', 'query', 'address', 'functionName']) {
 		const value = rec[key];
 		if (typeof value === 'string' && value.trim()) {
-			const trimmed = value.trim();
+			const trimmed = restoreArgText(value);
 			if (key === 'target') {
 				return formatScanActivityDetail(trimmed);
 			}
 			return trimmed;
 		}
+	}
+	return '';
+}
+
+const TOOL_RESULT_CLIP = 1200;
+
+function clipDetail(text: string): string {
+	const trimmed = text.trim();
+	return trimmed.length > TOOL_RESULT_CLIP ? `${trimmed.slice(0, TOOL_RESULT_CLIP)}…` : trimmed;
+}
+
+/** Real tool output for the activity row: stdout first, then text-ish fields, then the scan target, then JSON. */
+function toolResultSummary(payload: Record<string, unknown>): string {
+	const raw = payload.result ?? payload.output;
+	if (typeof raw === 'string') {
+		return clipDetail(raw);
+	}
+	const result = asRecord(raw);
+	if (!result) {
+		return '';
+	}
+	if (typeof result.stdout === 'string' && result.stdout.trim()) {
+		return clipDetail(result.stdout);
+	}
+	for (const key of ['text', 'message', 'detail', 'summary', 'output']) {
+		const value = result[key];
+		if (typeof value === 'string' && value.trim()) {
+			return clipDetail(value);
+		}
+	}
+	const meta = scanMetaFromResult(payload);
+	const target = formatScanActivityDetail(meta.target ?? '', meta.scannedAs, meta.scannedAsIp);
+	if (target) {
+		return target;
+	}
+	try {
+		const json = JSON.stringify(result);
+		if (json && json !== '{}' && json !== '[]') {
+			return clipDetail(json);
+		}
+	} catch {
+		/* circular */
 	}
 	return '';
 }
@@ -74,8 +124,18 @@ function resultError(payload: Record<string, unknown>): string | undefined {
 		if (typeof err === 'string' && err.trim()) {
 			return err.trim();
 		}
-		if (err && typeof err === 'object' && 'message' in err) {
-			return String((err as { message: unknown }).message);
+		if (err) {
+			const text = toDisplayText(err);
+			if (text && text !== 'Unknown error') {
+				return text;
+			}
+		}
+		const result = asRecord(payload.result) ?? asRecord(payload.output);
+		if (result) {
+			const nested = toDisplayText(result.stderr || result.error || result.message);
+			if (nested && nested !== 'Unknown error') {
+				return nested;
+			}
 		}
 		return 'error';
 	}
@@ -84,10 +144,10 @@ function resultError(payload: Record<string, unknown>): string | undefined {
 		return undefined;
 	}
 	if (result.ok === false) {
-		return String(result.stderr || result.detail || result.error || 'failed');
+		return toDisplayText(result.stderr || result.detail || result.error || 'failed');
 	}
 	if (typeof result.exitCode === 'number' && result.exitCode !== 0) {
-		return String(result.stderr || `exit ${result.exitCode}`);
+		return toDisplayText(result.stderr) || `exit ${result.exitCode}`;
 	}
 	return undefined;
 }
@@ -109,9 +169,9 @@ export function parseStreamChunk(chunk: unknown): {
 	const type = String(rec.type ?? '');
 	const payload = asRecord(rec.payload) ?? rec;
 
-	if (type === 'text-delta' || type === 'text') {
-		const text = String(payload.text ?? payload.textDelta ?? rec.text ?? rec.textDelta ?? '');
-		return text ? { kind: 'text', text } : { kind: 'other' };
+	if (type === 'text-delta' || type === 'text' || type === 'text-delta-chunk') {
+		const text = extractStreamTextDelta(rec);
+		return text !== undefined && text !== '' ? { kind: 'text', text } : { kind: 'other' };
 	}
 	if (type === 'tool-call' || type === 'tool-called') {
 		const name = String(payload.toolName ?? payload.name ?? rec.toolName ?? '');
@@ -123,10 +183,17 @@ export function parseStreamChunk(chunk: unknown): {
 	if (type === 'tool-result') {
 		const name = String(payload.toolName ?? payload.name ?? rec.toolName ?? '');
 		const error = resultError(payload);
-		const meta = scanMetaFromResult(payload);
-		const success = formatScanActivityDetail(meta.target ?? '', meta.scannedAs, meta.scannedAsIp);
+		// finding-record / updateWorkingMemory keep their args-based detail (severity · title,
+		// memory text) instead of being overwritten by the raw result payload.
+		const argsDetail = activityDetailFromArgs(payload.args ?? payload.input, name);
+		const detail = error ?? (argsDetail || toolResultSummary(payload));
+		return name ? { kind: 'tool-result', name, detail, error } : { kind: 'other' };
+	}
+	if (type === 'tool-error') {
+		const name = String(payload.toolName ?? payload.name ?? rec.toolName ?? '');
+		const error = formatChatError(payload.error ?? payload.message ?? 'Tool error');
 		return name
-			? { kind: 'tool-result', name, detail: error ?? success, error }
+			? { kind: 'tool-result', name, detail: error, error }
 			: { kind: 'other' };
 	}
 	if (type === 'tool-call-suspended' || type === 'tool-call-approval') {
@@ -187,10 +254,10 @@ async function readAgentStream(
 	let suspended: StreamConsumeResult['suspended'];
 	const streamRunId = typeof stream?.runId === 'string' ? stream.runId : '';
 	const emitText = (delta: string) => {
-		if (!delta) {
+		if (delta === '') {
 			return;
 		}
-		text += delta;
+		text = appendStreamDelta(text, delta);
 		onDelta(delta);
 		if (!sawText) {
 			sawText = true;
@@ -235,7 +302,7 @@ async function readAgentStream(
 
 	if (isAsyncIterable(stream?.textStream)) {
 		for await (const chunk of stream.textStream) {
-			emitText(typeof chunk === 'string' ? chunk : String(chunk ?? ''));
+			emitText(typeof chunk === 'string' ? chunk : (extractStreamTextDelta(chunk) ?? ''));
 		}
 		if (text) {
 			return { text, suspended };

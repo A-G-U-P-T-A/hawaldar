@@ -9,11 +9,21 @@ export type FindingClass =
 	| 'csrf'
 	| 'ssti'
 	| 'idor'
+	| 'version'
 	| 'other';
 
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
 export type FindingStatus = 'hypothesis' | 'validating' | 'confirmed' | 'unconfirmed' | 'not-exploitable';
+
+export interface FindingRequest {
+	method?: string;
+	url?: string;
+	body?: string;
+	status?: number;
+	response?: string;
+	tool?: string;
+}
 
 export interface FindingRecord {
 	id: string;
@@ -27,6 +37,8 @@ export interface FindingRecord {
 	steps: string[];
 	/** Tool evidence that backs the claim (status codes, excerpts, SAST locations). */
 	evidence: string;
+	/** Structured probe (method/URL/body/status) when a poc-request or similar ran. */
+	request: FindingRequest;
 	impact: string;
 	remediation: string;
 	references: string[];
@@ -47,6 +59,7 @@ export interface FindingWrite {
 	description?: string;
 	steps?: string[];
 	evidence?: string;
+	request?: FindingRequest;
 	impact?: string;
 	remediation?: string;
 	references?: string[];
@@ -61,7 +74,7 @@ export interface FindingFilter {
 	limit?: number;
 }
 
-export const FINDING_CLASSES: FindingClass[] = ['injection', 'xss', 'ssrf', 'auth', 'csrf', 'ssti', 'idor', 'other'];
+export const FINDING_CLASSES: FindingClass[] = ['injection', 'xss', 'ssrf', 'auth', 'csrf', 'ssti', 'idor', 'version', 'other'];
 export const FINDING_SEVERITIES: FindingSeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
 export const FINDING_STATUSES: FindingStatus[] = ['hypothesis', 'validating', 'confirmed', 'unconfirmed', 'not-exploitable'];
 
@@ -151,7 +164,7 @@ export class FindingsStore {
 	async list(filter: FindingFilter = {}): Promise<FindingRecord[]> {
 		await this.ready;
 		const rs = await this.client.execute(`
-			SELECT id, title, class, severity, status, target, description, steps, evidence,
+			SELECT id, title, class, severity, status, target, description, steps, evidence, request,
 				impact, remediation, refs, source, session_id, created_at, updated_at
 			FROM findings
 			ORDER BY updated_at DESC
@@ -181,7 +194,7 @@ export class FindingsStore {
 			return undefined;
 		}
 		const rs = await this.client.execute({
-			sql: `SELECT id, title, class, severity, status, target, description, steps, evidence,
+			sql: `SELECT id, title, class, severity, status, target, description, steps, evidence, request,
 					impact, remediation, refs, source, session_id, created_at, updated_at
 				FROM findings WHERE id = ?`,
 			args: [id],
@@ -211,6 +224,9 @@ export class FindingsStore {
 		const evidence = draft.evidence !== undefined
 			? cleanText(draft.evidence, CAPS.evidence)
 			: (existing?.evidence ?? '');
+		const request = draft.request !== undefined
+			? cleanRequest(draft.request)
+			: (existing?.request ?? {});
 		if (status === 'confirmed' && (steps.length === 0 || !evidence)) {
 			throw new Error('A confirmed finding needs reproduction steps and tool evidence. Mark it unconfirmed instead.');
 		}
@@ -232,6 +248,7 @@ export class FindingsStore {
 			description: cleanText(draft.description ?? existing?.description, CAPS.description),
 			steps,
 			evidence,
+			request,
 			impact: cleanText(draft.impact ?? existing?.impact, CAPS.impact),
 			remediation: cleanText(draft.remediation ?? existing?.remediation, CAPS.remediation),
 			references: draft.references !== undefined ? cleanReferences(draft.references) : (existing?.references ?? []),
@@ -242,17 +259,18 @@ export class FindingsStore {
 		};
 		await this.client.execute({
 			sql: `INSERT INTO findings (id, title, class, severity, status, target, description, steps, evidence,
-					impact, remediation, refs, source, session_id, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					request, impact, remediation, refs, source, session_id, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET title = excluded.title, class = excluded.class,
 					severity = excluded.severity, status = excluded.status, target = excluded.target,
 					description = excluded.description, steps = excluded.steps, evidence = excluded.evidence,
-					impact = excluded.impact, remediation = excluded.remediation, refs = excluded.refs,
-					source = excluded.source, session_id = excluded.session_id, updated_at = excluded.updated_at`,
+					request = excluded.request, impact = excluded.impact, remediation = excluded.remediation,
+					refs = excluded.refs, source = excluded.source, session_id = excluded.session_id,
+					updated_at = excluded.updated_at`,
 			args: [
 				record.id, record.title, record.vulnClass, record.severity, record.status, record.target,
-				record.description, JSON.stringify(record.steps), record.evidence, record.impact,
-				record.remediation, JSON.stringify(record.references), record.source, record.sessionId,
+				record.description, JSON.stringify(record.steps), record.evidence, JSON.stringify(record.request),
+				record.impact, record.remediation, JSON.stringify(record.references), record.source, record.sessionId,
 				record.createdAt, record.updatedAt,
 			],
 		});
@@ -331,6 +349,11 @@ export class FindingsStore {
 		`);
 		await this.client.execute('CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status)');
 		await this.client.execute('CREATE INDEX IF NOT EXISTS idx_findings_class ON findings(class)');
+		try {
+			await this.client.execute("ALTER TABLE findings ADD COLUMN request TEXT NOT NULL DEFAULT ''");
+		} catch {
+			/* column already exists */
+		}
 	}
 }
 
@@ -345,6 +368,7 @@ function mapFinding(row: Row): FindingRecord {
 		description: String(row.description ?? ''),
 		steps: parseJsonList(row.steps),
 		evidence: String(row.evidence ?? ''),
+		request: parseRequest(row.request),
 		impact: String(row.impact ?? ''),
 		remediation: String(row.remediation ?? ''),
 		references: parseJsonList(row.refs),
@@ -362,4 +386,40 @@ function parseJsonList(raw: unknown): string[] {
 	} catch {
 		return [];
 	}
+}
+
+function parseRequest(raw: unknown): FindingRequest {
+	try {
+		const parsed = typeof raw === 'string' && raw.trim() ? JSON.parse(raw) : raw;
+		return cleanRequest(parsed);
+	} catch {
+		return {};
+	}
+}
+
+function cleanRequest(value: unknown): FindingRequest {
+	if (!value || typeof value !== 'object') {
+		return {};
+	}
+	const rec = value as Record<string, unknown>;
+	const out: FindingRequest = {};
+	if (typeof rec.method === 'string' && rec.method.trim()) {
+		out.method = rec.method.trim().toUpperCase().slice(0, 16);
+	}
+	if (typeof rec.url === 'string' && rec.url.trim()) {
+		out.url = rec.url.trim().slice(0, 500);
+	}
+	if (typeof rec.body === 'string' && rec.body.trim()) {
+		out.body = rec.body.trim().slice(0, 2_000);
+	}
+	if (typeof rec.status === 'number' && Number.isFinite(rec.status)) {
+		out.status = rec.status;
+	}
+	if (typeof rec.response === 'string' && rec.response.trim()) {
+		out.response = rec.response.trim().slice(0, 2_000);
+	}
+	if (typeof rec.tool === 'string' && rec.tool.trim()) {
+		out.tool = rec.tool.trim().slice(0, 80);
+	}
+	return out;
 }

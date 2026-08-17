@@ -5,12 +5,23 @@ import {
 	FINDING_SEVERITIES,
 	FINDING_STATUSES,
 	type FindingRecord,
+	type FindingRequest,
 	type FindingsStore,
 	normalizeFindingClass,
 	normalizeFindingSeverity,
 	normalizeFindingStatus,
 } from '../findings-store';
 import { ensureWorkspace, WORKSPACE_DISPLAY_PATH, workspaceHostPath } from '../sandbox/workspace';
+import { restoreTargetPlaceholders } from '../policy';
+import { currentToolContext, lastMatchingProbe } from '../tool-context';
+import {
+	evidenceHasToolSnippet,
+	evidenceLooksResearchOnly,
+	formatFindingsChatTable,
+	parseRequestFromEvidence,
+	reportFileSlug,
+	type FindingRequestShape,
+} from '../tool-args';
 
 export const FINDING_TOOL_IDS = ['finding-record', 'finding-list', 'finding-export'] as const;
 
@@ -24,16 +35,22 @@ export function buildFindingInputSchema(z: any, id: string) {
 		return z.object({
 			id: z.string().optional().describe('Existing finding id to update. Omit to create (class+title+target dedupes re-runs).'),
 			title: z.string().describe('Short finding title, e.g. "Authentication bypass via direct dashboard access".'),
+			class: z.string().optional().describe('Alias for vulnClass. Prefer vulnClass.'),
 			vulnClass: z.enum(FINDING_CLASSES as [string, ...string[]]).optional()
-				.describe('injection | xss | ssrf | auth | csrf | ssti | idor | other'),
+				.describe('injection | xss | ssrf | auth | csrf | ssti | idor | version | other'),
 			severity: z.enum(FINDING_SEVERITIES as [string, ...string[]]).optional()
 				.describe('critical | high | medium | low | info. Do not inflate.'),
 			status: z.enum(FINDING_STATUSES as [string, ...string[]]).optional()
 				.describe('hypothesis → validating → confirmed | unconfirmed | not-exploitable. confirmed requires steps + evidence.'),
 			target: z.string().optional().describe('Host or URL the finding applies to.'),
 			description: z.string().optional(),
-			steps: z.array(z.string()).optional().describe('Numbered reproduction steps (required for confirmed).'),
-			evidence: z.string().optional().describe('Tool evidence: status codes, response excerpts, SAST locations (required for confirmed).'),
+			steps: z.union([z.array(z.string()), z.string(), z.number()]).optional()
+				.describe('Reproduction steps as string[]. A number (count from finding-list) is ignored.'),
+			evidence: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).optional()
+				.describe('Tool evidence: probe stdout (poc-request/poc-act/sqlmap/zap), status codes, canary markers, SAST locations (required for confirmed). Never "has evidence: true".'),
+			method: z.string().optional().describe('HTTP method of the probe that proved this finding (GET/POST/…).'),
+			url: z.string().optional().describe('Exact probe URL with 127.0.0.1, never [IP_ADDRESS].'),
+			body: z.union([z.string(), z.record(z.unknown())]).optional().describe('Probe request body if POST/PUT/PATCH.'),
 			impact: z.string().optional(),
 			remediation: z.string().optional(),
 			references: z.array(z.string()).optional(),
@@ -61,19 +78,36 @@ export async function runFindingTool(
 ) {
 	try {
 		if (id === 'finding-record') {
+			// Model args may carry the provider's [IP_ADDRESS] token; findings store real addresses.
+			const restore = (value: string) => restoreTargetPlaceholders(value, currentToolContext()?.impliedTargets ?? []);
+			let status = input.status !== undefined ? normalizeFindingStatus(input.status) : undefined;
+			let evidence = typeof input.evidence === 'string' ? restore(input.evidence) : undefined;
+			let steps = Array.isArray(input.steps) ? input.steps.map((item) => restore(String(item))) : undefined;
+			let request = requestFromInput(input, restore);
+			if (status === 'confirmed') {
+				const gated = gateConfirmedFinding({ evidence, steps, request, vulnClass: input.vulnClass });
+				status = gated.status;
+				evidence = gated.evidence;
+				steps = gated.steps;
+				request = gated.request;
+				if (gated.downgraded) {
+					console.warn('[hawaldar] finding-record: confirmed without tool-output snippet — downgraded to unconfirmed');
+				}
+			}
 			const record = await store.upsert({
 				id: typeof input.id === 'string' && input.id.trim() ? input.id.trim() : undefined,
-				title: typeof input.title === 'string' ? input.title : undefined,
+				title: typeof input.title === 'string' ? restore(input.title) : undefined,
 				vulnClass: input.vulnClass !== undefined ? normalizeFindingClass(input.vulnClass) : undefined,
 				severity: input.severity !== undefined ? normalizeFindingSeverity(input.severity) : undefined,
-				status: input.status !== undefined ? normalizeFindingStatus(input.status) : undefined,
-				target: typeof input.target === 'string' ? input.target : undefined,
-				description: typeof input.description === 'string' ? input.description : undefined,
-				steps: Array.isArray(input.steps) ? input.steps.map((item) => String(item)) : undefined,
-				evidence: typeof input.evidence === 'string' ? input.evidence : undefined,
-				impact: typeof input.impact === 'string' ? input.impact : undefined,
-				remediation: typeof input.remediation === 'string' ? input.remediation : undefined,
-				references: Array.isArray(input.references) ? input.references.map((item) => String(item)) : undefined,
+				status,
+				target: typeof input.target === 'string' ? restore(input.target) : undefined,
+				description: typeof input.description === 'string' ? restore(input.description) : undefined,
+				steps,
+				evidence,
+				request,
+				impact: typeof input.impact === 'string' ? restore(input.impact) : undefined,
+				remediation: typeof input.remediation === 'string' ? restore(input.remediation) : undefined,
+				references: Array.isArray(input.references) ? input.references.map((item) => restore(String(item))) : undefined,
 				source: extra?.source,
 				sessionId: extra?.sessionId,
 			});
@@ -84,6 +118,7 @@ export async function runFindingTool(
 				class: record.vulnClass,
 				severity: record.severity,
 				status: record.status,
+				downgraded: status === 'unconfirmed' && input.status === 'confirmed',
 			});
 		}
 		if (id === 'finding-list') {
@@ -106,19 +141,24 @@ export async function runFindingTool(
 					severity: row.severity,
 					status: row.status,
 					target: row.target,
-					steps: row.steps.length,
+					stepCount: row.steps.length,
 					hasEvidence: Boolean(row.evidence),
 					updatedAt: row.updatedAt,
 				})),
 			});
 		}
 		if (id === 'finding-export') {
-			const target = typeof input.target === 'string' ? input.target.trim() : '';
+			const implied = currentToolContext()?.impliedTargets ?? [];
+			const target = restoreTargetPlaceholders(
+				typeof input.target === 'string' ? input.target.trim() : (implied[0] || ''),
+				implied,
+			);
 			const title = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : 'Engagement report';
 			const findings = await store.list();
 			const markdown = renderFindingsReport(findings, { title, target });
-			const saved = saveReportArtifact(markdown, target);
-			return ok({ ...saved, findings: findings.length });
+			const saved = saveReportArtifact(markdown, target, implied);
+			const table = formatFindingsChatTable(findings);
+			return ok({ ...saved, findings: findings.length, table });
 		}
 		return fail(`Unknown tool: ${id}`);
 	} catch (error) {
@@ -212,6 +252,9 @@ function renderFinding(row: FindingRecord, index: number): string[] {
 		row.evidence,
 		'```',
 	];
+	if (row.request?.method || row.request?.url) {
+		lines.push('', '**Request:**', '', '```', formatRequestBlock(row.request), '```');
+	}
 	if (row.impact) {
 		lines.push('', `**Impact:** ${row.impact}`);
 	}
@@ -230,18 +273,92 @@ function summarize(text: string): string {
 	return flat.length > 180 ? `${flat.slice(0, 180)}…` : flat || 'no notes';
 }
 
-export function saveReportArtifact(markdown: string, target: string): { path: string; displayPath: string } {
+export function saveReportArtifact(
+	markdown: string,
+	target: string,
+	implied: readonly string[] = [],
+): { path: string; displayPath: string } {
 	ensureWorkspace();
 	const dir = path.join(workspaceHostPath(), 'reports');
 	fs.mkdirSync(dir, { recursive: true });
 	const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-	const slug = (target.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'engagement').slice(0, 60);
+	const slug = reportFileSlug(target, implied);
 	const filePath = path.join(dir, `${stamp}-${slug}.md`);
 	fs.writeFileSync(filePath, markdown, 'utf8');
 	return {
 		path: filePath,
 		displayPath: `${WORKSPACE_DISPLAY_PATH}/reports/${path.basename(filePath)}`,
 	};
+}
+
+function gateConfirmedFinding(opts: {
+	evidence?: string;
+	steps?: string[];
+	request?: FindingRequest;
+	vulnClass?: unknown;
+}): { status: 'confirmed' | 'unconfirmed'; evidence: string; steps: string[]; request: FindingRequest; downgraded: boolean } {
+	let evidence = opts.evidence || '';
+	let steps = opts.steps ? [...opts.steps] : [];
+	let request = { ...(opts.request || {}) };
+	const probe = lastMatchingProbe({ classHint: typeof opts.vulnClass === 'string' ? opts.vulnClass : undefined });
+	if (probe && (!evidenceHasToolSnippet(evidence) || !request.url)) {
+		if (!evidenceHasToolSnippet(evidence)) {
+			evidence = [evidence, probe.stdout].filter(Boolean).join('\n\n').slice(0, 8_000);
+		}
+		if (!request.method && probe.method) {
+			request.method = probe.method;
+		}
+		if (!request.url && probe.url) {
+			request.url = probe.url;
+		}
+		if (!request.body && probe.body) {
+			request.body = probe.body;
+		}
+		if (request.status == null && probe.status != null) {
+			request.status = probe.status;
+		}
+		if (!request.response) {
+			request.response = probe.stdout.slice(0, 2_000);
+		}
+		if (!request.tool) {
+			request.tool = probe.tool;
+		}
+		if (steps.length === 0 && probe.method && probe.url) {
+			steps = [`${probe.method} ${probe.url}`];
+		}
+	}
+	const parsed = parseRequestFromEvidence(evidence);
+	if (parsed) {
+		request = { ...parsed, ...request };
+	}
+	const hasSnippet = evidenceHasToolSnippet(evidence);
+	const researchOnly = evidenceLooksResearchOnly(evidence);
+	if (!hasSnippet || researchOnly) {
+		return { status: 'unconfirmed', evidence, steps, request, downgraded: true };
+	}
+	return { status: 'confirmed', evidence, steps, request, downgraded: false };
+}
+
+function requestFromInput(input: Record<string, unknown>, restore: (value: string) => string): FindingRequest | undefined {
+	const method = typeof input.method === 'string' ? input.method.trim().toUpperCase() : undefined;
+	const url = typeof input.url === 'string' ? restore(input.url) : undefined;
+	const body = typeof input.body === 'string'
+		? restore(input.body)
+		: (input.body && typeof input.body === 'object' ? JSON.stringify(input.body) : undefined);
+	if (!method && !url && !body) {
+		return undefined;
+	}
+	return { method, url, body, tool: 'poc-request' };
+}
+
+function formatRequestBlock(request: FindingRequestShape): string {
+	const lines = [
+		[request.method, request.url].filter(Boolean).join(' ') || request.url || '',
+		request.status != null ? `status ${request.status}` : '',
+		request.body ? `body ${request.body}` : '',
+		request.response ? `response ${request.response}` : '',
+	].filter(Boolean);
+	return lines.join('\n');
 }
 
 function ok(payload: Record<string, unknown>) {

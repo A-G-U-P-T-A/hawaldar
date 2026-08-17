@@ -8,6 +8,7 @@ import {
 	MISSING_TARGET_REASON,
 	parseTargetRef,
 	resolveLocalScanTarget,
+	skipReasonForTool,
 } from '../policy';
 import { looksLikeDockerBin } from '../sandbox/host-info';
 import { containerLoopbackTarget, podmanRun } from '../sandbox/podman';
@@ -133,6 +134,10 @@ export async function runNmapTool(
 	}
 
 	const raw = target.trim() || (id === 'scan-local-ports' ? '127.0.0.1' : '');
+	const skip = skipReasonForTool(id, extra?.operatorTarget || raw, extra?.impliedTargets);
+	if (skip) {
+		return { ok: true, stdout: skip, stderr: '', exitCode: 0, tool: id, target: extra?.operatorTarget || raw };
+	}
 	if (id === 'scan-local-ports') {
 		const local = resolveLocalScanTarget(raw || '127.0.0.1');
 		if (!local) {

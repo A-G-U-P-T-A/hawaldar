@@ -12,15 +12,15 @@
   "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/ensure-electron.mjs",
     "ensure-electron": "node scripts/ensure-electron.mjs",
     "dev": "node scripts/ensure-electron.mjs && electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
+    "build": "npx electron-vite build",
+    "preview": "npx electron-vite preview",
     "brand:png": "node scripts/export-brand-png.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "dist": "npm run build && electron-builder && node scripts/ensure-electron.mjs",
-    "dist:dir": "npm run build && electron-builder --dir && node scripts/ensure-electron.mjs"
+    "typecheck": "npx tsc --noEmit -p tsconfig.node.json && npx tsc --noEmit -p tsconfig.web.json",
+    "smoke:tools": "node scripts/smoke-tools.mjs",
+    "dist": "npm run build && npx electron-builder && node scripts/ensure-electron.mjs",
+    "dist:dir": "npm run build && npx electron-builder --dir && node scripts/ensure-electron.mjs"
   },
   "build": {
     "appId": "com.hawaldar.app",

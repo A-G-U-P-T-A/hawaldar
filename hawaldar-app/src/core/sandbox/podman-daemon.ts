@@ -89,13 +89,19 @@ export async function ensureDaemon(spec: DaemonSpec): Promise<{ ok: boolean; det
 		'--cap-drop=ALL',
 		'-p',
 		`127.0.0.1:${spec.hostPort}:${spec.containerPort}`,
+	];
+	// Daemons (e.g. ZAP) dial operator-loopback targets themselves, so they need
+	// the same pasta --map-gw gateway as ephemeral tools; plain pasta resolves
+	// host.containers.internal but cannot route to it on WSL2.
+	args.push('--network', docker ? 'bridge' : 'pasta:--map-gw');
+	args.push(
 		'--add-host',
 		`${hostGatewayAlias(docker)}:host-gateway`,
 		'--memory',
 		`${spec.memoryMb ?? 1024}m`,
 		'--pids-limit',
 		String(spec.pidsLimit ?? 512),
-	];
+	);
 	for (const [key, value] of Object.entries(spec.env ?? {})) {
 		args.push('-e', `${key}=${value}`);
 	}

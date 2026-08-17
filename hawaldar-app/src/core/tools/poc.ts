@@ -1,4 +1,3 @@
-import { parseHitlResume, type HitlAsk, type HitlToolContext } from '../hitl';
 import { evaluateBrowserNavigation, listBrowserAllowHosts } from '../policy';
 import { looksLikeDockerBin } from '../sandbox/host-info';
 import { podmanRun } from '../sandbox/podman';
@@ -50,7 +49,7 @@ export interface PocToolInput {
 	url?: string;
 	method?: string;
 	headers?: Record<string, string>;
-	body?: string;
+	body?: string | Record<string, unknown>;
 	payload?: string;
 	actions?: PocAction[];
 }
@@ -69,7 +68,8 @@ export function buildPocInputSchema(z: any, id: string) {
 				.describe('Default GET. DELETE is refused (non-destructive policy).'),
 			headers: z.record(z.string()).optional()
 				.describe('Optional headers. Cookie/Authorization values are redacted in output, never echoed back.'),
-			body: z.string().optional().describe('Optional request body (max 8 KB). Destructive SQL (DROP/DELETE/UPDATE/INSERT) is refused.'),
+			body: z.union([z.string(), z.record(z.unknown())]).optional()
+				.describe('Optional request body (max 8 KB). Objects are JSON-stringified. Destructive SQL (DROP/DELETE/UPDATE/INSERT) is refused.'),
 		});
 	}
 	if (id === 'poc-act') {
@@ -93,33 +93,9 @@ export function buildPocInputSchema(z: any, id: string) {
 
 /**
  * Per-probe operator approval. Third gate after engine + tool image.
- * Suspends through Mastra when possible so the in-app dialog resumes the same call.
+ * IPC askHitl only — Mastra suspend/resume after Approve crashed the app.
  */
-export async function ensurePocApproval(
-	summary: PocAskSummary,
-	options?: { hitlContext?: HitlToolContext; askHitl?: (req: HitlAsk) => Promise<boolean> },
-): Promise<{ status: 'ok' } | { status: 'declined'; detail: string } | { status: 'suspended'; value: unknown }> {
-	const resume = parseHitlResume(
-		options?.hitlContext?.agent?.resumeData ?? options?.hitlContext?.workflow?.resumeData,
-	);
-	if (resume?.kind === 'poc-probe') {
-		return resume.approved ? { status: 'ok' } : { status: 'declined', detail: 'user declined' };
-	}
-	const ask: HitlAsk = {
-		kind: 'poc-probe',
-		title: summary.title,
-		explanation: summary.explanation,
-	};
-	const suspendFn = options?.hitlContext?.agent?.suspend ?? options?.hitlContext?.workflow?.suspend;
-	if (suspendFn) {
-		return { status: 'suspended', value: await suspendFn(ask) };
-	}
-	if (options?.askHitl) {
-		const approved = await options.askHitl(ask);
-		return approved ? { status: 'ok' } : { status: 'declined', detail: 'user declined' };
-	}
-	return { status: 'declined', detail: 'PoC probes need operator approval.' };
-}
+export { ensurePocApproval } from '../hitl-gate';
 
 export function pocAskSummary(settings: HawaldarSettings, id: string, input: PocToolInput): { ok: true; value: PocAskSummary } | { ok: false; reason: string } {
 	const scope = settings.scope;
@@ -243,7 +219,9 @@ function checkRequest(input: PocToolInput, scope: readonly string[], docker: boo
 	if (!ALLOWED_METHODS.has(method)) {
 		return { ok: false, reason: `Method ${method} is refused. Allowed: ${[...ALLOWED_METHODS].join(', ')} (DELETE is destructive).` };
 	}
-	const body = typeof input.body === 'string' ? input.body : '';
+	const body = typeof input.body === 'string'
+		? input.body
+		: (input.body && typeof input.body === 'object' ? JSON.stringify(input.body) : '');
 	if (body.length > MAX_BODY) {
 		return { ok: false, reason: `body is limited to ${MAX_BODY} characters.` };
 	}

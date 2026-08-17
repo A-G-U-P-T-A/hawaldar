@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { NoteSummaryDTO } from '../../preload/api';
-import { NotesIcon } from './navIcons';
+import type { FindingDTO, NoteSummaryDTO } from '../../preload/api';
+import { FindingsIcon, NotesIcon } from './navIcons';
 import PaneSash from './PaneSash';
 import { clampGrow, MAIN_PANE_MIN, useDragResize, usePersistedPanelSize } from './paneResize';
 import { fuzzyMatch } from './sessionGroups';
+import { restoreRedactedAddresses } from './keepAddresses';
 
 const COLLAPSED_KEY = 'hawaldar.rightPanelCollapsed';
+const PANE_KEY = 'hawaldar.rightPanelPane';
+
+type RailPane = 'notes' | 'findings';
 
 function readCollapsed(): boolean {
 	try {
@@ -23,6 +27,22 @@ function writeCollapsed(value: boolean) {
 	}
 }
 
+function readPane(): RailPane {
+	try {
+		return window.localStorage.getItem(PANE_KEY) === 'findings' ? 'findings' : 'notes';
+	} catch {
+		return 'notes';
+	}
+}
+
+function writePane(value: RailPane) {
+	try {
+		window.localStorage.setItem(PANE_KEY, value);
+	} catch {
+		/* private mode / quota */
+	}
+}
+
 function errText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
@@ -33,6 +53,8 @@ interface Props {
 	onOpenNote: (id: string, title: string) => void;
 	onCreateNote: () => void;
 	onNoteRemoved: (id: string) => void;
+	onOpenFindings?: () => void;
+	findingsCount?: number;
 }
 
 export default function RightPanel({
@@ -41,8 +63,11 @@ export default function RightPanel({
 	onOpenNote,
 	onCreateNote,
 	onNoteRemoved,
+	onOpenFindings,
+	findingsCount = 0,
 }: Props) {
 	const [collapsed, setCollapsed] = useState(readCollapsed);
+	const [pane, setPane] = useState<RailPane>(readPane);
 	const railRef = useRef<HTMLElement>(null);
 	const railSize = usePersistedPanelSize('rightRail');
 	const railResize = useDragResize({
@@ -87,8 +112,8 @@ export default function RightPanel({
 			<button
 				type="button"
 				className="rail-groove right-rail-groove"
-				title={collapsed ? 'Expand notes' : 'Collapse notes'}
-				aria-label={collapsed ? 'Expand notes' : 'Collapse notes'}
+				title={collapsed ? 'Expand notes and findings' : 'Collapse notes and findings'}
+				aria-label={collapsed ? 'Expand notes and findings' : 'Collapse notes and findings'}
 				aria-expanded={!collapsed}
 				onPointerDown={(event) => {
 					if (!collapsed) {
@@ -110,26 +135,71 @@ export default function RightPanel({
 			<div className="right-rail-clip">
 				<div className="right-rail-inner" inert={collapsed}>
 					<div className="right-rail-head">
-						<div className="right-rail-title">
-							<NotesIcon size={14} />
-							<span>Notes</span>
+						<div className="right-rail-tabs" role="tablist" aria-label="Notes and findings">
+							<button
+								type="button"
+								role="tab"
+								className={`right-rail-tab${pane === 'notes' ? ' active' : ''}`}
+								aria-selected={pane === 'notes'}
+								onClick={() => {
+									setPane('notes');
+									writePane('notes');
+								}}
+							>
+								<NotesIcon size={14} />
+								<span>Notes</span>
+							</button>
+							<button
+								type="button"
+								role="tab"
+								className={`right-rail-tab right-rail-tab-badged${pane === 'findings' ? ' active' : ''}`}
+								aria-selected={pane === 'findings'}
+								onClick={() => {
+									setPane('findings');
+									writePane('findings');
+								}}
+							>
+								<FindingsIcon size={14} />
+								<span>Findings</span>
+								{findingsCount > 0 && (
+									<span className="rail-badge" aria-hidden="true">
+										{findingsCount > 99 ? '99+' : findingsCount}
+									</span>
+								)}
+							</button>
 						</div>
-						<button
-							type="button"
-							className="icon-btn"
-							title="New note"
-							aria-label="New note"
-							onClick={onCreateNote}
-						>
-							+
-						</button>
+						{pane === 'notes' ? (
+							<button
+								type="button"
+								className="icon-btn"
+								title="New note"
+								aria-label="New note"
+								onClick={onCreateNote}
+							>
+								+
+							</button>
+						) : (
+							<button
+								type="button"
+								className="icon-btn"
+								title="Open findings"
+								aria-label="Open findings"
+								onClick={() => onOpenFindings?.()}
+							>
+								↗
+							</button>
+						)}
 					</div>
-					<NotesPane
-						listEpoch={listEpoch}
-						activeId={activeNoteId}
-						onOpen={onOpenNote}
-						onRemoved={onNoteRemoved}
-					/>
+					{pane === 'notes' ? (
+						<NotesPane
+							listEpoch={listEpoch}
+							activeId={activeNoteId}
+							onOpen={onOpenNote}
+							onRemoved={onNoteRemoved}
+						/>
+					) : (
+						<FindingsPane onOpenPage={() => onOpenFindings?.()} />
+					)}
 				</div>
 			</div>
 		</aside>
@@ -213,6 +283,63 @@ function NotesPane({
 								×
 							</button>
 						</span>
+					</div>
+				))}
+			</div>
+		</div>
+	);
+}
+
+function FindingsPane({ onOpenPage }: { onOpenPage: () => void }) {
+	const [rows, setRows] = useState<FindingDTO[]>([]);
+	const [query, setQuery] = useState('');
+	const [error, setError] = useState('');
+
+	const refresh = useCallback(async () => {
+		try {
+			setRows(await window.hawaldar.listFindings());
+			setError('');
+		} catch (err) {
+			setError(errText(err));
+		}
+	}, []);
+
+	useEffect(() => {
+		void refresh();
+		const off = window.hawaldar.onFindingsChanged(() => void refresh());
+		return () => off();
+	}, [refresh]);
+
+	const visible = useMemo(
+		() => rows.filter((row) => fuzzyMatch(query, `${row.title} ${row.vulnClass} ${row.status} ${row.target}`)),
+		[query, rows],
+	);
+
+	return (
+		<div className="right-pane">
+			<div className="right-search">
+				<input
+					type="search"
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					placeholder="Search findings"
+					aria-label="Search findings"
+				/>
+			</div>
+			{error && <div className="right-pane-status is-error">{error}</div>}
+			<div className="right-list">
+				{rows.length === 0 && (
+					<div className="empty-rail">No findings yet.</div>
+				)}
+				{rows.length > 0 && visible.length === 0 && (
+					<div className="empty-rail">No matching findings.</div>
+				)}
+				{visible.map((row) => (
+					<div key={row.id} className="right-row">
+						<button type="button" className="right-row-main stacked" onClick={onOpenPage}>
+							<span className="title">{restoreRedactedAddresses(row.title)}</span>
+							<span className="meta">{row.status} · {row.vulnClass}</span>
+						</button>
 					</div>
 				))}
 			</div>

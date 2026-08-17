@@ -18,36 +18,27 @@ import {
 	resolveControllableServiceId,
 	type PersistServiceSettings,
 } from './tools/services';
+import {
+	USER_DECLINED,
+	parseHitlResume,
+	type HitlAsk,
+	type HitlToolContext,
+} from './hitl-gate';
 
-export const USER_DECLINED = 'user declined';
-
-export type HitlKind = 'podman' | 'tool-image' | 'poc-probe';
-
-export interface HitlAsk {
-	kind: HitlKind;
-	title: string;
-	explanation: string;
-	serviceId?: string;
-}
-
-export interface HitlSuspendPayload extends HitlAsk {}
-
-export interface HitlResumeData {
-	approved: boolean;
-	kind: HitlKind;
-	serviceId?: string;
-}
-
-export interface HitlToolContext {
-	agent?: {
-		suspend?: (payload: HitlSuspendPayload) => Promise<unknown>;
-		resumeData?: HitlResumeData;
-	};
-	workflow?: {
-		suspend?: (payload: HitlSuspendPayload) => Promise<unknown>;
-		resumeData?: HitlResumeData;
-	};
-}
+export {
+	USER_DECLINED,
+	definedToolResult,
+	ensurePocApproval,
+	hitlToolSchemas,
+	parseHitlResume,
+	parseHitlSuspendPayload,
+	releaseHitlWaiter,
+	type HitlAsk,
+	type HitlKind,
+	type HitlResumeData,
+	type HitlSuspendPayload,
+	type HitlToolContext,
+} from './hitl-gate';
 
 export type HitlGateResult =
 	| { status: 'ok'; settings: HawaldarSettings }
@@ -62,60 +53,6 @@ export interface EnsureRuntimeHitlOptions {
 	onActivity?: (event: { type: 'tool:start' | 'tool:done'; name: string; detail: string; status: 'start' | 'ok' | 'error' }) => void;
 	persistEnginePath?: (podmanPath: string) => Promise<void>;
 	approvals?: ApprovalsStore;
-}
-
-/** Mastra suspend/resume schemas for catalog tools. Uses the runtime `z` instance. */
-export function hitlToolSchemas(z: any) {
-	const kind = z.enum(['podman', 'tool-image', 'poc-probe']);
-	return {
-		suspendSchema: z.object({
-			kind,
-			title: z.string(),
-			explanation: z.string(),
-			serviceId: z.string().optional(),
-		}),
-		resumeSchema: z.object({
-			approved: z.boolean(),
-			kind,
-			serviceId: z.string().optional(),
-		}),
-	};
-}
-
-export function parseHitlResume(raw: unknown): HitlResumeData | undefined {
-	if (!raw || typeof raw !== 'object') {
-		return undefined;
-	}
-	const rec = raw as Record<string, unknown>;
-	if (typeof rec.approved !== 'boolean') {
-		return undefined;
-	}
-	const kind = rec.kind === 'tool-image' || rec.kind === 'podman' || rec.kind === 'poc-probe' ? rec.kind : undefined;
-	if (!kind) {
-		return { approved: rec.approved, kind: 'podman' };
-	}
-	return {
-		approved: rec.approved,
-		kind,
-		serviceId: typeof rec.serviceId === 'string' && rec.serviceId.trim() ? rec.serviceId.trim() : undefined,
-	};
-}
-
-export function parseHitlSuspendPayload(raw: unknown): HitlSuspendPayload | undefined {
-	if (!raw || typeof raw !== 'object') {
-		return undefined;
-	}
-	const rec = raw as Record<string, unknown>;
-	const kind = rec.kind === 'tool-image' || rec.kind === 'podman' || rec.kind === 'poc-probe' ? rec.kind : undefined;
-	if (!kind || typeof rec.title !== 'string' || typeof rec.explanation !== 'string') {
-		return undefined;
-	}
-	return {
-		kind,
-		title: rec.title,
-		explanation: rec.explanation,
-		serviceId: typeof rec.serviceId === 'string' && rec.serviceId.trim() ? rec.serviceId.trim() : undefined,
-	};
 }
 
 export async function inspectEngine(settings: HawaldarSettings): Promise<{
@@ -284,12 +221,11 @@ async function hasRemembered(
 }
 
 /**
- * Mastra HITL gate: Podman approval, then tool-image approval.
- * Uses `context.agent.suspend` when present; otherwise the IPC `askHitl` fallback
- * (workflow sequential path) shows the same in-app modal.
- *
- * Remembered SQLite approvals skip `podman` (existing-machine start only) and
- * `tool-image`. Install / create-machine still asks. `poc-probe` is never stored.
+ * HITL gate: Podman approval, then tool-image approval.
+ * IPC `askHitl` only — never Mastra suspend/resumeStream (that path crashed
+ * the app after Approve). Remembered SQLite approvals skip `podman`
+ * (existing-machine start only) and `tool-image`. Install / create-machine
+ * still asks. `poc-probe` is never stored.
  */
 export async function ensureRuntimeHitl(
 	settings: HawaldarSettings,
@@ -303,19 +239,15 @@ export async function ensureRuntimeHitl(
 		return { status: 'declined', detail: USER_DECLINED };
 	}
 
-	const suspendFn = options?.hitlContext?.agent?.suspend ?? options?.hitlContext?.workflow?.suspend;
 	const request = async (ask: HitlAsk): Promise<HitlGateResult | undefined> => {
-		if (suspendFn) {
-			return { status: 'suspended', value: await suspendFn(ask) };
+		if (!options?.askHitl) {
+			return { status: 'declined', detail: USER_DECLINED };
 		}
-		if (options?.askHitl) {
-			const approved = await options.askHitl(ask);
-			if (!approved) {
-				return { status: 'declined', detail: USER_DECLINED };
-			}
-			return undefined;
+		const approved = await options.askHitl(ask);
+		if (!approved) {
+			return { status: 'declined', detail: USER_DECLINED };
 		}
-		return { status: 'declined', detail: USER_DECLINED };
+		return undefined;
 	};
 
 	const store = options?.approvals;

@@ -22,25 +22,28 @@
   </header>
   <main class="wrap">
     <h1>Building from source</h1>
+    <p>The app lives in <code>hawaldar-app/</code>. Node 22+ is required. <code>scripts/ensure-electron.mjs</code> downloads <code>electron.exe</code> because Electron 43 has no npm postinstall.</p>
+    <h2>Windows</h2>
+    <pre><code>git clone https://github.com/A-G-U-P-T-A/hawaldar.git
+cd hawaldar\hawaldar-app
+scripts\setup.bat
+scripts\dev.bat</code></pre>
+    <p>Daily work is <code>scripts\dev.bat</code> only. Never chain <code>dist.bat</code> after <code>dev.bat</code> — <code>dev</code> is a blocking Electron process. When you want an installer, stop dev (Ctrl+C) and run <code>scripts\dist.bat</code> in a new command.</p>
+    <p>Or <code>npm i</code> then <code>npm run dev</code>. Installer: <code>hawaldar-app/release/Hawaldar Setup 0.1.0.exe</code> via <code>scripts\dist.bat</code>.</p>
+    <h2>macOS / Linux</h2>
     <pre><code>git clone https://github.com/A-G-U-P-T-A/hawaldar.git
 cd hawaldar/hawaldar-app
-# Windows
-scripts\setup.bat
-scripts\dev.bat
-# macOS / Linux
 chmod +x scripts/*.sh
 ./scripts/setup.sh
 ./scripts/dev.sh</code></pre>
-    <p>Node 22+ is required. <code>setup</code> runs <code>npm ci</code>/<code>npm i</code> and restores the Electron binary via <code>scripts/ensure-electron.mjs</code>.</p>
+    <p>Packaged output is <code>hawaldar-app/release/</code> — <code>.dmg</code>/<code>.zip</code> on macOS, <code>.AppImage</code>/<code>.deb</code> on Linux. Run <code>./scripts/dist.sh</code> only after stopping dev.</p>
+    <p><code>setup</code> runs <code>npm ci</code>/<code>npm i</code> and restores the Electron binary via <code>scripts/ensure-electron.mjs</code>. <code>dev</code> skips that restore when the Electron binary is already on disk.</p>
     <h2>Typecheck</h2>
     <pre><code>npm run typecheck</code></pre>
     <h2>Packaged installer</h2>
-    <pre><code>scripts\dist.bat
-# or
-./scripts/dist.sh</code></pre>
-    <p>That runs typecheck, <code>electron-vite build</code>, and electron-builder, then restores Electron so <code>npm run dev</code> still works. Output is <code>hawaldar-app/release/</code>.</p>
+    <p><code>dist</code> runs typecheck, <code>electron-vite build</code>, and electron-builder, then restores Electron so <code>npm run dev</code> still works.</p>
     <h2>Electron uninstall after dist</h2>
-    <p>electron-builder often removes <code>node_modules/electron/path.txt</code> and the dist binary. electron-vite then throws <code>Error: Electron uninstall</code>. Fix: <code>npm run ensure-electron</code> (also hooked from <code>postinstall</code>, <code>npm run dist</code>, and the setup/dev/dist scripts).</p>
+    <p>electron-builder often removes <code>node_modules/electron/path.txt</code> and the dist binary. electron-vite then throws <code>Error: Electron uninstall</code>. Fix: <code>npm run ensure-electron</code> (also hooked from <code>npm run dist</code> and the setup/dist scripts). Daily <code>dev</code> skips the restore when <code>electron.exe</code> is already present.</p>
     <p>Do not commit <code>node_modules</code>, <code>release/</code>, <code>.env</code>, or <code>~/.hawaldar</code> data.</p>
   </main>
   <footer><div class="wrap"><a href="index.html">Home</a></div></footer>

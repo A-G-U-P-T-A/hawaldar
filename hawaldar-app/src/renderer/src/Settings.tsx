@@ -474,7 +474,7 @@ export default function Settings({ onSaved, onClose, initialCategory = 'provider
 					{selectedProvider
 						? `${selectedProvider.envVar ? selectedProvider.envVar : 'No API key'} · ${selectedProvider.listKind}`
 						: 'Provider, model, and API credentials.'}
-					{' '}Enabled provider is restored from <code>~/.hawaldar/hawaldar.db</code>. API keys stay in settings.json.
+					{' '}Enabled provider is restored from <code>~/.hawaldar/hawaldar.db</code>. API keys stay in settings.json, or <code>OPENROUTER_API_KEY</code> in hawaldar-app/.env / the repo .env. Save applies on the next message — no restart for keys.
 				</p>
 				<div className="form-grid">
 					<div className="field">

@@ -92,8 +92,10 @@ export async function podmanRun(request: PodmanRunRequest): Promise<CommandResul
 		'1',
 		'--memory',
 		`${request.memoryMb ?? 512}m`,
+		// Default 128 starves Go tools: nuclei crashes LoadTemplates with
+		// "failed to create new OS thread (have 129 already; errno=11)".
 		'--pids-limit',
-		String(request.pidsLimit ?? 128),
+		String(request.pidsLimit ?? 4096),
 	);
 	if (request.entrypoint) {
 		// JSON exec-form so Podman/Docker never wrap the binary in `sh -c`.
@@ -137,6 +139,12 @@ function commandIfDistinct(request: PodmanRunRequest): string | undefined {
  * Never slirp4netns — removed in Podman 5/6. Docker uses bridge.
  * --network host only on Linux, and only when reaching operator loopback.
  * `networkContainer` shares an hw-* daemon netns (loopback-published Juice Shop).
+ *
+ * Podman target runs pin `pasta:--map-gw`: default pasta resolves
+ * host.containers.internal but cannot route to host-published services on
+ * WSL2 (bridge/netavark is unusable there), so every tool run got i/o
+ * timeouts against e.g. Juice Shop on 127.0.0.1:3000. --map-gw maps the
+ * gateway address to the host, which makes the alias actually reachable.
  */
 function appendNetworkArgs(args: string[], request: PodmanRunRequest, docker: boolean): void {
 	if (request.networkContainer) {
@@ -153,6 +161,8 @@ function appendNetworkArgs(args: string[], request: PodmanRunRequest, docker: bo
 	}
 	if (docker) {
 		args.push('--network', 'bridge');
+	} else {
+		args.push('--network', 'pasta:--map-gw');
 	}
 	if (request.reachHostLoopback && usesHostGatewayAlias()) {
 		args.push('--add-host', `${hostGatewayAlias(docker)}:host-gateway`);

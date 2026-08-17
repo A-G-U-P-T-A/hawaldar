@@ -1,5 +1,5 @@
 import type { MouseEvent, ReactNode } from 'react';
-import { ChatIcon, GraphIcon, NotesIcon, TasksIcon } from './navIcons';
+import { ChatIcon, FindingsIcon, GraphIcon, NotesIcon, TasksIcon } from './navIcons';
 import type { WorkspaceTab } from './workspaceTabs';
 
 interface Props {
@@ -22,6 +22,9 @@ function TabGlyph({ tab }: { tab: WorkspaceTab }) {
 	}
 	if (tab.kind === 'graph') {
 		return <GraphIcon size={12} />;
+	}
+	if (tab.kind === 'findings') {
+		return <FindingsIcon size={12} />;
 	}
 	return <ChatIcon size={12} />;
 }

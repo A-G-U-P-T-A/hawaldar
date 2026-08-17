@@ -141,7 +141,16 @@ def ensure_storage() -> None:
 
 
 def fetch_page(job: dict):
-	from scrapling.fetchers import Fetcher
+	try:
+		from scrapling.fetchers import Fetcher
+	except ModuleNotFoundError as error:
+		# scrapling imports playwright/browserforge eagerly (engines/toolbelt/*) even
+		# for the curl_cffi Fetcher; the image ships those Python packages only.
+		missing = getattr(error, "name", "") or str(error)
+		raise RuntimeError(
+			f"scrapling dependency '{missing}' missing from the image; "
+			"rebuild localhost/hawaldar/scrapling:min from resources/containers/scrapling."
+		) from error
 
 	ensure_storage()
 	Fetcher.configure(
@@ -155,6 +164,13 @@ def fetch_page(job: dict):
 		"max_redirects": 5,
 		"verify": not job["insecure"],
 	}
+	if not job["url"].lower().startswith("https://"):
+		# Cleartext HTTP: chrome impersonation otherwise attempts an h2c upgrade
+		# that Node/Express-style targets answer by killing the socket (curl 52
+		# "Empty reply"). Pin HTTP/1.1; the chrome header profile still applies.
+		from curl_cffi.const import CurlHttpVersion
+
+		kwargs["http_version"] = CurlHttpVersion.V1_1
 	return Fetcher.get(job["url"], **kwargs)
 
 

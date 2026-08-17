@@ -21,6 +21,8 @@ export interface ChatHistoryQuery {
 	limit?: number;
 	/** Exclusive `createdAt` cursor (ms). Older pages pass the oldest loaded message time. */
 	before?: number;
+	/** Oldest loaded message id; excluded from the page when timestamps tie. */
+	beforeId?: string;
 }
 
 export interface ChatHistoryMessage {
@@ -506,7 +508,7 @@ export interface KnowledgeGraphDTO {
 	status: KnowledgeStatusDTO;
 }
 
-export type FindingClass = 'injection' | 'xss' | 'ssrf' | 'auth' | 'csrf' | 'ssti' | 'idor' | 'other';
+export type FindingClass = 'injection' | 'xss' | 'ssrf' | 'auth' | 'csrf' | 'ssti' | 'idor' | 'version' | 'other';
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type FindingStatus = 'hypothesis' | 'validating' | 'confirmed' | 'unconfirmed' | 'not-exploitable';
 
@@ -520,6 +522,14 @@ export interface FindingDTO {
 	description: string;
 	steps: string[];
 	evidence: string;
+	request?: {
+		method?: string;
+		url?: string;
+		body?: string;
+		status?: number;
+		response?: string;
+		tool?: string;
+	};
 	impact: string;
 	remediation: string;
 	references: string[];

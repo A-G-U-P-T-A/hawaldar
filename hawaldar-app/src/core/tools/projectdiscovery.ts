@@ -151,15 +151,18 @@ function hostArgs(id: string, scoped: { host: string; url: string; port?: number
 				? ['-host', scoped.host, '-p', String(scoped.port), '-scan-type', 'c', '-silent']
 				: ['-host', scoped.host, '-top-ports', '1000', '-scan-type', 'c', '-silent'];
 		case 'katana':
-			return ['-u', scoped.url, '-d', '2', '-silent', '-jc'];
+			return ['-u', scoped.url, '-d', '3', '-c', '20', '-jc', '-kf', 'all', '-fs', 'fqdn', '-silent'];
 		case 'katana-depth':
-			return ['-u', scoped.url, '-d', '3', '-fs', 'fqdn', '-silent'];
+			return ['-u', scoped.url, '-d', '4', '-c', '20', '-jc', '-kf', 'all', '-fs', 'fqdn', '-silent'];
 		case 'katana-js':
-			return ['-u', scoped.url, '-d', '1', '-fs', 'fqdn', '-silent', '-jc'];
+			return ['-u', scoped.url, '-d', '2', '-c', '20', '-jc', '-kf', 'all', '-fs', 'fqdn', '-silent'];
 		case 'nuclei':
-			return ['-u', scoped.url, '-tags', 'tech,dns,discovery', '-severity', 'info', '-silent'];
+			// -duc: templates are baked into the image; per-run update checks hit
+			// codeload.github.com, which is unreachable from pasta-run containers
+			// on WSL2 and only stalls the scan.
+			return ['-u', scoped.url, '-tags', 'tech,dns,discovery', '-severity', 'info', '-silent', '-duc'];
 		case 'nuclei-tech':
-			return ['-u', scoped.url, '-tags', 'tech', '-severity', 'info', '-silent'];
+			return ['-u', scoped.url, '-tags', 'tech', '-severity', 'info', '-silent', '-duc'];
 		case 'nuclei-severity-info':
 			return [
 				'-u', scoped.url,
@@ -167,6 +170,7 @@ function hostArgs(id: string, scoped: { host: string; url: string; port?: number
 				'-severity', 'info,low',
 				'-etags', 'cve,exploit,rce,sqli,lfi,ssrf,intrusive',
 				'-silent',
+				'-duc',
 			];
 		default:
 			return undefined;
@@ -203,14 +207,35 @@ async function run(
 		reachHostLoopback,
 		mounts,
 	});
+	let stdout = result.stdout.slice(0, 20_000);
+	if (id === 'katana' || id === 'katana-depth' || id === 'katana-js') {
+		stdout = dedupeKatanaUrls(result.stdout).slice(0, 20_000);
+	}
 	return {
 		ok: result.exitCode === 0 && !result.timedOut,
-		stdout: result.stdout.slice(0, 20_000),
+		stdout,
 		stderr: result.stderr.slice(0, 4_000),
 		exitCode: result.exitCode,
 		timedOut: result.timedOut,
 		source: BUILTIN_SOURCE,
 	};
+}
+
+function dedupeKatanaUrls(stdout: string): string {
+	const seen = new Set<string>();
+	const lines: string[] = [];
+	for (const line of stdout.split(/\r?\n/)) {
+		const key = line.trim();
+		if (!key) {
+			continue;
+		}
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		lines.push(line);
+	}
+	return lines.join('\n');
 }
 
 function pdBin(command: string): string {

@@ -1,4 +1,4 @@
-import { restoreRedactedAddresses } from './MarkdownBody';
+import { restoreRedactedAddresses } from './keepAddresses';
 import {
 	addressesFromActivity,
 	buildDeskPath,

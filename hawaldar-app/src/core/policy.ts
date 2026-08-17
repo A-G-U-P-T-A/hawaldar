@@ -390,6 +390,9 @@ export function fillImpliedToolTarget(
 	}
 
 	if (isUrlFacingTool(toolId)) {
+		if (restoredReq && keepsUrlPath(restoredReq)) {
+			return restoredReq;
+		}
 		return merged?.url || merged?.display || restoredReq;
 	}
 
@@ -407,6 +410,16 @@ export function fillImpliedToolTarget(
 	return list.length === 1 ? list[0] : undefined;
 }
 
+/** Keep path+query for probe URLs (sqlmap/poc/zap). parseTargetRef otherwise collapses to origin. */
+function keepsUrlPath(value: string): boolean {
+	try {
+		const parsed = new URL(value);
+		return (parsed.pathname && parsed.pathname !== '/') || Boolean(parsed.search);
+	} catch {
+		return false;
+	}
+}
+
 export function isSastTool(toolId: string): boolean {
 	return SAST_TOOLS.has(toolId);
 }
@@ -422,14 +435,26 @@ export function isDnsEnumTool(toolId: string): boolean {
 	return DNS_ENUM_TOOLS.has(toolId);
 }
 
-/** Host-side skip: localhost has no public DNS / subdomains. */
+/** Host-side skip: localhost has no public DNS / subdomains; Juice Shop / loopback URLs skip host-gateway nmap/naabu. */
 export function skipReasonForTool(toolId: string, target: string | undefined, implied: readonly string[] = []): string | undefined {
-	const ref = parseTargetRef(target || implied[0] || '');
-	if (!ref?.local) {
+	const candidates = [target, ...implied].map((item) => (item || '').trim()).filter(Boolean);
+	const refs = candidates.map((item) => parseTargetRef(item)).filter((item): item is TargetRef => Boolean(item));
+	const local = refs.find((item) => item.local);
+	if (!local) {
 		return undefined;
 	}
 	if (DNS_ENUM_TOOLS.has(toolId)) {
-		return `Skipped: ${ref.display} is loopback — no public DNS or subdomains.`;
+		return `Skipped: ${local.display} is loopback — no public DNS or subdomains.`;
+	}
+	const loopbackWeb = refs.some((item) => item.local && (
+		item.lab === 'juice-shop'
+		|| Boolean(item.port)
+		|| Boolean(item.url)
+		|| looksLikeHttpUrl(item.raw)
+	));
+	if (loopbackWeb && BROAD_LOCAL_SCAN_TOOLS.has(toolId)) {
+		const shown = refs.find((item) => item.local && (item.url || item.port))?.display || local.display;
+		return `Skipped: ${shown} is a loopback web app — no broad host-gateway nmap/naabu. Recon uses httpx/katana/browser/scrapling on this URL.`;
 	}
 	return undefined;
 }
@@ -895,8 +920,11 @@ export function extractCanonicalTarget(message: string, scope: readonly string[]
 	return undefined;
 }
 
-function juiceLabFor(_host: string, _port: number | undefined, raw: string): 'juice-shop' | undefined {
+function juiceLabFor(host: string, port: number | undefined, raw: string): 'juice-shop' | undefined {
 	if (JUICE_SHOP_HINT.test(raw)) {
+		return 'juice-shop';
+	}
+	if (isLocalMachineTarget(host) && port === JUICE_SHOP_LAB_PORT) {
 		return 'juice-shop';
 	}
 	return undefined;

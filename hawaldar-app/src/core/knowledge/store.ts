@@ -512,8 +512,8 @@ export function formatRagContext(hits: KnowledgeHit[]): string {
 		return '';
 	}
 	const lines = [
-		'KNOWLEDGE / RAG (retrieved from Lance + notes/tasks/playbooks/chats)',
-		'Use only as supporting context. Do not invent evidence. Prefer tool results over these snippets.',
+		'HISTORICAL KNOWLEDGE / RAG (retrieved from Lance + notes/tasks/playbooks/older chats). Do not treat as this run.',
+		'Never use these snippets as evidence of what happened this turn. Prefer this turn\'s tool outputs and finding-list.',
 	];
 	for (const hit of hits) {
 		const body = clipSnippet(hit.text, 700);

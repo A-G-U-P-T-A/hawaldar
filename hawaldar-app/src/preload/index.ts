@@ -9,7 +9,18 @@ ipcRenderer.on('quit:ask', (_: Electron.IpcRendererEvent, ev: QuitAskEvent) => {
 });
 
 const api: HawaldarAPI = {
-	chatStream: (req: ChatRequest) => ipcRenderer.invoke('chat.stream', req),
+	chatStream: async (req: ChatRequest) => {
+		try {
+			return await ipcRenderer.invoke('chat.stream', req);
+		} catch (error) {
+			const raw = error instanceof Error ? error.message : String(error ?? '');
+			const message = raw
+				.replace(/^Error invoking remote method '[^']+':\s*/i, '')
+				.replace(/^Error:\s*/i, '')
+				.trim() || raw.trim() || 'Unknown error';
+			return { requestId: '', text: message, error: message };
+		}
+	},
 	chatHistory: (sessionId: string, query?: ChatHistoryQuery) => ipcRenderer.invoke('chat.history', sessionId, query ?? {}),
 	onChatDelta: (cb) => {
 		const handler = (_: Electron.IpcRendererEvent, ev: ChatDeltaEvent) => cb(ev);

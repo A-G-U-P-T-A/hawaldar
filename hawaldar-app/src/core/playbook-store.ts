@@ -65,7 +65,8 @@ export interface RuleDecision {
 
 const ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const RULE_KINDS = new Set<RuleKind>(['require_service', 'max_timeout', 'allowed_tools', 'blocked_tools']);
-const FORBIDDEN_STEP = /msfvenom|msfconsole|sqlmap|stealth|os-?detect|exploit\/|burp-?intruder|payload|xss-poc|sqli-poc/i;
+/** Unbounded exploit tooling. Sanctioned sqlmap-scan / zap-ascan / poc-* are allowed playbook steps. */
+const FORBIDDEN_STEP = /msfvenom|msfconsole|stealth|os-?detect|exploit\/|burp-?intruder|(?:^|[-_/])payload(?:$|[-_/])|xss-poc|sqli-poc/i;
 const STEP_KINDS = new Set<WorkflowStepKind>(['tool', 'agent', 'workflow']);
 
 const BUILTIN_WORKFLOWS: WorkflowRecord[] = [
@@ -129,7 +130,6 @@ const BUILTIN_WORKFLOWS: WorkflowRecord[] = [
 			{ kind: 'tool', id: 'semgrep-list' },
 			{ kind: 'tool', id: 'semgrep-scan' },
 			{ kind: 'tool', id: 'semgrep-owasp' },
-			{ kind: 'agent', id: 'research' },
 		],
 		enabled: true,
 		builtin: true,
@@ -143,7 +143,6 @@ const BUILTIN_WORKFLOWS: WorkflowRecord[] = [
 			{ kind: 'tool', id: 'semgrep-list' },
 			{ kind: 'tool', id: 'semgrep-scan' },
 			{ kind: 'tool', id: 'semgrep-path' },
-			{ kind: 'agent', id: 'research' },
 		],
 		enabled: true,
 		builtin: true,
@@ -201,6 +200,8 @@ const BUILTIN_WORKFLOWS: WorkflowRecord[] = [
 		key: 'vulnDetect',
 		name: 'Vuln-class detection',
 		steps: [
+			{ kind: 'tool', id: 'nuclei-tech' },
+			{ kind: 'tool', id: 'nuclei-severity-info' },
 			{ kind: 'agent', id: 'vuln-injection' },
 			{ kind: 'agent', id: 'vuln-xss' },
 			{ kind: 'agent', id: 'vuln-ssrf' },
@@ -229,6 +230,7 @@ const BUILTIN_WORKFLOWS: WorkflowRecord[] = [
 		key: 'validate',
 		name: 'Validate evidence',
 		steps: [
+			{ kind: 'tool', id: 'finding-list' },
 			{ kind: 'agent', id: 'validation' },
 		],
 		enabled: true,
@@ -240,6 +242,8 @@ const BUILTIN_WORKFLOWS: WorkflowRecord[] = [
 		key: 'report',
 		name: 'Engagement report',
 		steps: [
+			{ kind: 'tool', id: 'finding-list' },
+			{ kind: 'tool', id: 'finding-export' },
 			{ kind: 'agent', id: 'reporting' },
 		],
 		enabled: true,
@@ -251,7 +255,9 @@ const BUILTIN_WORKFLOWS: WorkflowRecord[] = [
 		key: 'correlateReport',
 		name: 'Correlate and report',
 		steps: [
+			{ kind: 'tool', id: 'finding-list' },
 			{ kind: 'agent', id: 'validation' },
+			{ kind: 'tool', id: 'finding-export' },
 			{ kind: 'agent', id: 'reporting' },
 		],
 		enabled: true,

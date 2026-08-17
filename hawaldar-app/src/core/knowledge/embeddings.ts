@@ -1,5 +1,6 @@
 import type { MastraModules } from '../load-mastra';
 import type { HawaldarSettings } from '../settings';
+import { mastraCustomModelUrl, openRouterRequestHeaders, resolveProviderApiKey } from '../providers';
 
 export interface EmbedderHandle {
 	ready: boolean;
@@ -17,6 +18,7 @@ export interface EmbedderRouterConfig {
 	modelId: string;
 	url?: string;
 	apiKey?: string;
+	headers?: Record<string, string>;
 }
 
 interface EmbedPlan {
@@ -75,9 +77,6 @@ export function tryCreateRouterEmbedder(
 	if (!plan || !mods.ModelRouterEmbeddingModel) {
 		return {};
 	}
-	if (!settings.apiKey && !isLocalProvider(settings.provider)) {
-		return {};
-	}
 	try {
 		return { instance: new mods.ModelRouterEmbeddingModel(plan.router) };
 	} catch (error) {
@@ -87,7 +86,7 @@ export function tryCreateRouterEmbedder(
 
 export function embeddingPlan(settings: HawaldarSettings): EmbedPlan | null {
 	const provider = settings.provider;
-	const key = settings.apiKey.trim();
+	const key = resolveProviderApiKey(provider, settings.apiKey);
 	const local = isLocalProvider(provider);
 	if (!key && !local) {
 		return null;
@@ -107,14 +106,16 @@ export function embeddingPlan(settings: HawaldarSettings): EmbedPlan | null {
 		};
 	}
 	if (provider === 'openrouter') {
+		const custom = mastraCustomModelUrl(provider, base, false);
 		return {
 			modelId: 'openrouter/text-embedding-3-small',
 			dimension: 1536,
 			router: {
 				providerId: 'openrouter',
 				modelId: 'openai/text-embedding-3-small',
-				url: base,
+				...(custom ? { url: custom } : {}),
 				apiKey: key || undefined,
+				headers: openRouterRequestHeaders(key),
 			},
 			http: { url: `${base}/embeddings`, apiKey: key, model: 'openai/text-embedding-3-small' },
 		};
@@ -192,7 +193,9 @@ async function embedBatch(texts: string[], router: unknown, plan: EmbedPlan): Pr
 			method: 'POST',
 			headers: {
 				'content-type': 'application/json',
-				authorization: `Bearer ${plan.http.apiKey}`,
+				...(plan.router.providerId === 'openrouter'
+					? openRouterRequestHeaders(plan.http.apiKey)
+					: { authorization: `Bearer ${plan.http.apiKey}` }),
 			},
 			body: JSON.stringify({ model: plan.http.model, input: texts }),
 		});

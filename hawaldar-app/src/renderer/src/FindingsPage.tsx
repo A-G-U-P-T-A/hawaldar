@@ -7,6 +7,7 @@ import type {
 	FindingStatus,
 } from '../../preload/api';
 import { FindingsIcon } from './navIcons';
+import { restoreRedactedAddresses } from './keepAddresses';
 import { useI18n } from './i18n';
 
 const SEVERITIES: FindingSeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
@@ -20,7 +21,7 @@ const STATUS_CHIPS: Array<{ id: FindingStatus | 'all'; labelKey: string }> = [
 	{ id: 'not-exploitable', labelKey: 'findings.notExploitable' },
 ];
 
-const CLASS_CHIPS: FindingClass[] = ['injection', 'xss', 'ssrf', 'auth', 'csrf', 'ssti', 'idor', 'other'];
+const CLASS_CHIPS: FindingClass[] = ['injection', 'xss', 'ssrf', 'auth', 'csrf', 'ssti', 'idor', 'version', 'other'];
 
 const IDLE_STAGES = [
 	{ id: 'pre-recon', labelKey: 'findings.stage.pre-recon' },
@@ -244,7 +245,7 @@ export default function FindingsPage() {
 
 			<div className="phase-rail" role="list" aria-label="Engagement phases">
 				{run
-					? run.phases.map((phase) => (
+					? (run.phases ?? []).map((phase) => (
 						<div
 							key={phase.id}
 							className={`phase-step is-${phase.status}`}
@@ -358,9 +359,9 @@ export default function FindingsPage() {
 									aria-expanded={open}
 									onClick={() => toggleExpanded(finding.id)}
 								>
-									<span className="finding-title">{finding.title}</span>
-									<span className="finding-meta">
-										{finding.target}
+									<span className="finding-title" title={restoreRedactedAddresses(finding.title)}>{restoreRedactedAddresses(finding.title)}</span>
+									<span className="finding-meta" title={restoreRedactedAddresses(finding.target)}>
+										{restoreRedactedAddresses(finding.target)}
 										{finding.source ? ` · ${finding.source}` : ''}
 										{finding.updatedAt ? ` · ${fmtTime(finding.updatedAt)}` : ''}
 									</span>
@@ -393,15 +394,26 @@ export default function FindingsPage() {
 											<h3>Reproduction (PoC)</h3>
 											<ol>
 												{finding.steps.map((step, index) => (
-													<li key={index}>{step}</li>
+													<li key={index}>{restoreRedactedAddresses(step)}</li>
 												))}
 											</ol>
+										</section>
+									)}
+									{(finding.request?.method || finding.request?.url) && (
+										<section className="finding-section">
+											<h3>Request</h3>
+											<pre className="finding-evidence">{[
+												[finding.request.method, restoreRedactedAddresses(finding.request.url || '')].filter(Boolean).join(' '),
+												finding.request.status != null ? `status ${finding.request.status}` : '',
+												finding.request.body ? `body ${finding.request.body}` : '',
+												finding.request.response ? `response ${finding.request.response}` : '',
+											].filter(Boolean).join('\n')}</pre>
 										</section>
 									)}
 									{finding.evidence && (
 										<section className="finding-section">
 											<h3>Evidence</h3>
-											<pre className="finding-evidence">{finding.evidence}</pre>
+											<pre className="finding-evidence">{restoreRedactedAddresses(finding.evidence)}</pre>
 										</section>
 									)}
 									{finding.impact && (

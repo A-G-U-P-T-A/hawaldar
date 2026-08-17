@@ -20,6 +20,17 @@ export const MASTRA_PROVIDERS: ProviderInfo[] = [
 	{ id: 'custom', label: 'OpenAI-compatible', envVar: 'OPENAI_API_KEY', defaultBaseUrl: 'http://127.0.0.1:11434/v1', listKind: 'openai', models: ['local'] },
 ];
 
+export const MISSING_API_KEY_HINT = 'Set an API key in Settings → Providers.';
+
+export const OPENROUTER_MISSING_KEY =
+	'OpenRouter API key missing. Settings → Provider → paste key → Save (applies on the next message). Or set OPENROUTER_API_KEY in hawaldar-app/.env or the repo .env.';
+
+/** OpenRouter app attribution. Authorization is added separately when a key exists. */
+export const OPENROUTER_APP_HEADERS: Record<string, string> = {
+	'HTTP-Referer': 'https://hawaldar.local',
+	'X-Title': 'Hawaldar',
+};
+
 export function getProvider(id: string): ProviderInfo | undefined {
 	return MASTRA_PROVIDERS.find((item) => item.id === id);
 }
@@ -28,17 +39,112 @@ export function providerEnvVar(id: string): string {
 	return getProvider(id)?.envVar ?? 'OPENAI_API_KEY';
 }
 
+/** Cloud providers that must send a Bearer key (not Ollama / LM Studio). */
+export function providerNeedsApiKey(provider: string): boolean {
+	return Boolean(getProvider(provider)?.envVar);
+}
+
+export function isDefaultProviderUrl(provider: string, baseUrl: string): boolean {
+	const expected = (getProvider(provider)?.defaultBaseUrl || '').replace(/\/+$/, '');
+	const actual = (baseUrl || '').replace(/\/+$/, '');
+	return Boolean(expected) && actual === expected;
+}
+
+/** True for OpenRouter's public API host. Passing this as Mastra `url` skips Bearer auth. */
+export function isOpenRouterGatewayUrl(baseUrl: string): boolean {
+	const actual = (baseUrl || '').trim();
+	if (!actual) {
+		return false;
+	}
+	if (isDefaultProviderUrl('openrouter', actual)) {
+		return true;
+	}
+	try {
+		const host = new URL(actual.includes('://') ? actual : `https://${actual}`).hostname.replace(/^www\./, '');
+		return host === 'openrouter.ai';
+	} catch {
+		return /openrouter\.ai/i.test(actual);
+	}
+}
+
+/**
+ * URL to put on Mastra's model config. Omit OpenRouter's own host so Mastra uses
+ * the OpenRouter gateway (Authorization: Bearer) instead of openai-compatible.
+ */
+export function mastraCustomModelUrl(provider: string, baseUrl: string, local: boolean): string | undefined {
+	const trimmed = (baseUrl || '').replace(/\/+$/, '').trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	if (provider === 'openrouter' && isOpenRouterGatewayUrl(trimmed)) {
+		return undefined;
+	}
+	if (!local && isDefaultProviderUrl(provider, trimmed)) {
+		return undefined;
+	}
+	return trimmed;
+}
+
+/** OpenRouter chat/embeddings headers. Never log the returned Authorization value. */
+export function openRouterRequestHeaders(apiKey: string): Record<string, string> {
+	const headers: Record<string, string> = { ...OPENROUTER_APP_HEADERS };
+	const key = apiKey.trim();
+	if (key) {
+		headers.Authorization = `Bearer ${key}`;
+	}
+	return headers;
+}
+
+export function missingProviderApiKeyError(provider?: string): Error {
+	if (provider === 'openrouter') {
+		return new Error(OPENROUTER_MISSING_KEY);
+	}
+	const label = getProvider(provider || '')?.label || 'This provider';
+	return new Error(`${label} needs an API key. ${MISSING_API_KEY_HINT}`);
+}
+
+/** Settings key wins; otherwise OPENROUTER_API_KEY / the provider env var. */
+export function resolveProviderApiKey(provider: string, settingsKey?: string): string {
+	const fromSettings = (settingsKey || '').trim();
+	if (fromSettings) {
+		return fromSettings;
+	}
+	const envVar = providerEnvVar(provider);
+	if (envVar) {
+		const fromEnv = (process.env[envVar] || '').trim();
+		if (fromEnv) {
+			return fromEnv;
+		}
+	}
+	if (provider === 'openrouter') {
+		return (process.env.OPENROUTER_API_KEY || '').trim();
+	}
+	return '';
+}
+
 export function applyProviderEnv(provider: string, apiKey: string, baseUrl: string): void {
-	if (apiKey) {
+	const key = resolveProviderApiKey(provider, apiKey);
+	if (key) {
 		const envVar = providerEnvVar(provider);
 		if (envVar) {
-			process.env[envVar] = apiKey;
+			process.env[envVar] = key;
 		}
-		process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || apiKey;
+		if (provider === 'openrouter') {
+			process.env.OPENROUTER_API_KEY = key;
+		} else {
+			process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || key;
+		}
 	}
-	if (baseUrl) {
-		process.env.OPENAI_BASE_URL = baseUrl;
-		process.env.OPENAI_API_BASE = baseUrl;
+	const trimmedBase = (baseUrl || '').replace(/\/+$/, '');
+	// OpenRouter's own host on OPENAI_BASE_URL makes clients skip Bearer auth.
+	if (provider === 'openrouter' && (!trimmedBase || isOpenRouterGatewayUrl(trimmedBase))) {
+		delete process.env.OPENAI_BASE_URL;
+		delete process.env.OPENAI_API_BASE;
+		return;
+	}
+	if (trimmedBase) {
+		process.env.OPENAI_BASE_URL = trimmedBase;
+		process.env.OPENAI_API_BASE = trimmedBase;
 	}
 }
 
