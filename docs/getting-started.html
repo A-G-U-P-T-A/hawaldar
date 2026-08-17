@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Getting started — Hawaldar</title>
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="index.html">Hawaldar</a>
+      <nav>
+        <a href="getting-started.html">Getting started</a>
+        <a href="install.html">Install</a>
+        <a href="podman.html">Podman</a>
+        <a href="legal.html">Legal</a>
+        <a href="building.html">Build from source</a>
+        <a href="releasing.html">Releasing</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>Getting started</h1>
+    <p>Use Hawaldar only on systems you own or administer, with written permission, or under a contracted pentest. The first-run Legal page must be accepted before tools run.</p>
+    <h2>1. Clone</h2>
+    <pre><code>git clone https://github.com/A-G-U-P-T-A/hawaldar.git
+cd hawaldar/hawaldar-app</code></pre>
+    <h2>2. Node 22+</h2>
+    <p>Check with <code>node -v</code>. Then:</p>
+    <pre><code>scripts\setup.bat
+scripts\dev.bat</code></pre>
+    <p>On macOS/Linux: <code>chmod +x scripts/*.sh && ./scripts/setup.sh && ./scripts/dev.sh</code>.</p>
+    <p>After the first setup, daily work is <code>scripts\dev.bat</code> (or <code>./scripts/dev.sh</code>) only. Do not chain <code>scripts\dist.bat</code> after <code>dev</code> — stop the app first, then package in a separate command.</p>
+    <h2>3. Legal gate</h2>
+    <p>Accept the in-app agreement. Decline quits. LICENSE remains English even if you change the UI language.</p>
+    <h2>4. Provider and API key</h2>
+    <p>Open Settings → Provider. Choose a provider, model, and API key. Keys are stored in <code>~/.hawaldar/settings.json</code> (encrypted when the OS keychain is available).</p>
+    <h2>5. Podman</h2>
+    <p>Open Runtime and choose <strong>Set up Podman</strong>. Tools do not run on the host. See <a href="podman.html">Podman</a>.</p>
+    <h2>6. Scope</h2>
+    <p>Settings → Scope. Named hosts/IPs/CIDRs. Out-of-scope targets are blocked in code, not only in the prompt.</p>
+    <h2>Chat</h2>
+    <p>Type a target and a task, or slash commands such as <code>/nmap</code>, <code>/dns</code>, <code>/full-engagement</code>. Copy turn / Copy thread export Markdown including live tool steps.</p>
+  </main>
+  <footer><div class="wrap"><a href="index.html">Home</a></div></footer>
+</body>
+</html>

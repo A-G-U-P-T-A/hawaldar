@@ -1,0 +1,18 @@
+# Minimal contained Scrapling recon — HTTP Fetcher + adaptive selectors.
+# curl_cffi TLS impersonation only. No browser binaries, no CAPTCHA solver.
+# Tag: localhost/hawaldar/scrapling:min
+FROM docker.io/library/python:3.12-slim-bookworm
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/hawaldar-scrapling
+COPY recon.py ./
+# scrapling 0.4.14 imports `playwright` (engines/toolbelt/convertor.py) and
+# `browserforge` (engines/toolbelt/fingerprints.py) at module level even for the
+# curl_cffi Fetcher, so the Python packages must be present. Browser binaries are
+# NOT installed (no `playwright install`) — recon.py never launches a browser.
+RUN pip install --no-cache-dir --upgrade pip \
+	&& pip install --no-cache-dir "scrapling==0.4.14" "curl_cffi>=0.16.0" "playwright>=1.61.0" "browserforge>=1.2.4" \
+	&& rm -rf /root/.cache /tmp/*
+# Host calls: python /opt/hawaldar-scrapling/recon.py …
+# No ENTRYPOINT so readiness can run `python --version`.

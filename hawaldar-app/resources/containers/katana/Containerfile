@@ -1,0 +1,20 @@
+ARG VERSION=1.1.1
+# glibc base: the release binary is built on Ubuntu; alpine musl + gcompat shim
+# broke exec ("missing dynamic library /usr/local/bin/katana").
+FROM docker.io/library/debian:bookworm-slim AS down
+ARG VERSION
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends curl ca-certificates unzip \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& curl -fsSL "https://github.com/projectdiscovery/katana/releases/download/v${VERSION}/katana_${VERSION}_linux_amd64.zip" -o /tmp/t.zip \
+	&& unzip -j /tmp/t.zip katana -d /usr/local/bin \
+	&& chmod +x /usr/local/bin/katana
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+COPY --from=down /usr/local/bin/katana /usr/local/bin/katana
+# Fail the build (not the engagement) if the binary cannot exec on this arch/libc.
+RUN /usr/local/bin/katana -version
+ENTRYPOINT []
+CMD ["katana"]

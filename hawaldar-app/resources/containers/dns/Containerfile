@@ -1,0 +1,5 @@
+# Minimal DNS recon — Alpine + dig (bind-tools). No exploit tooling.
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache bind-tools ca-certificates \
+	&& rm -rf /var/cache/apk/*
+# No ENTRYPOINT so tools can run `dig` (or later helpers) explicitly.

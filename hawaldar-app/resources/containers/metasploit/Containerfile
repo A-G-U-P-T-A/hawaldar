@@ -1,0 +1,8 @@
+# Official Metasploit Framework image, retagged for Hawaldar.
+# Large (~2GB uncompressed). Runtime is search/info + auxiliary/scanner + read-only
+# check, plus HITL-gated exploit/* runs (sessions backgrounded via run -z / exploit -z,
+# auto-killed via sessions -K). post/* and payload builders stay refused.
+# Official entrypoint expects postgres + UID remap — we replace it.
+FROM docker.io/metasploitframework/metasploit-framework:latest
+WORKDIR /usr/src/metasploit-framework
+ENTRYPOINT ["/usr/src/metasploit-framework/msfconsole"]

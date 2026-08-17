@@ -1,0 +1,52 @@
+rules:
+  - id: hawaldar.owasp.sqli-format
+    message: Formatted or interpolated SQL. OWASP A03 injection class. Detection only.
+    languages: [python, javascript, typescript, php]
+    severity: WARNING
+    metadata:
+      hawaldar-class: injection
+      owasp: A03:2021
+    patterns:
+      - pattern-either:
+          - pattern: $DB.execute("...".format($X))
+          - pattern: $DB.execute(f"...{$X}...")
+          - pattern: $DB.query("..." + $X)
+          - pattern: mysqli_query($DB, $Q)
+
+  - id: hawaldar.owasp.xss-template
+    message: Unescaped template interpolation into markup. XSS class. Detection only.
+    languages: [javascript, typescript]
+    severity: WARNING
+    metadata:
+      hawaldar-class: xss
+      owasp: A03:2021
+    patterns:
+      - pattern-either:
+          - pattern: $RES.send(`<...${$X}...>`)
+          - pattern: $RES.write(`<...${$X}...>`)
+
+  - id: hawaldar.owasp.ssrf-redirect
+    message: Server-side request or redirect to a variable location. SSRF / open-redirect class. Detection only.
+    languages: [javascript, typescript, python]
+    severity: INFO
+    metadata:
+      hawaldar-class: ssrf
+      owasp: A10:2021
+    patterns:
+      - pattern-either:
+          - pattern: $RES.redirect($URL)
+          - pattern: $RES.redirect($REQ.query.$P)
+          - pattern: requests.request($M, $URL)
+
+  - id: hawaldar.owasp.auth-disabled
+    message: Authentication or CSRF protection appears disabled. Auth class. Detection only.
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    metadata:
+      hawaldar-class: auth
+      owasp: A07:2021
+    patterns:
+      - pattern-either:
+          - pattern: csrf = False
+          - pattern: { auth: false }
+          - pattern: authenticate = False

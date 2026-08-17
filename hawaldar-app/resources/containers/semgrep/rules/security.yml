@@ -1,0 +1,101 @@
+rules:
+  - id: hawaldar.injection.sql-concat
+    message: String concatenation into a SQL-looking query. Review for injection. Detection only.
+    languages: [python, javascript, typescript, go, java, ruby, php]
+    severity: WARNING
+    metadata:
+      hawaldar-class: injection
+      owasp: A03:2021
+    patterns:
+      - pattern-either:
+          - pattern: $DB.execute($Q + $X)
+          - pattern: $DB.query($Q + $X)
+          - pattern: $DB.exec($Q + $X)
+          - pattern: cursor.execute($Q + $X)
+          - pattern: cursor.execute($Q % $X)
+          - pattern: $DB.query(`...${$X}...`)
+
+  - id: hawaldar.injection.command
+    message: Process or shell invocation may include untrusted input. Command-injection class. Detection only.
+    languages: [python, javascript, typescript, go]
+    severity: WARNING
+    metadata:
+      hawaldar-class: injection
+      owasp: A03:2021
+    patterns:
+      - pattern-either:
+          - pattern: os.system($X)
+          - pattern: os.popen($X)
+          - pattern: subprocess.Popen($X, shell=True)
+          - pattern: subprocess.call($X, shell=True)
+          - pattern: child_process.exec($X)
+          - pattern: child_process.execSync($X)
+          - pattern: exec($X)
+
+  - id: hawaldar.injection.eval
+    message: Dynamic evaluate/exec. Injection / code-exec class. Detection only.
+    languages: [python, javascript, typescript, php]
+    severity: WARNING
+    metadata:
+      hawaldar-class: injection
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+          - pattern: Function($X)
+          - pattern: new Function($X)
+
+  - id: hawaldar.xss.innerhtml
+    message: HTML sink assignment. XSS class. Detection only — no proof payload.
+    languages: [javascript, typescript]
+    severity: WARNING
+    metadata:
+      hawaldar-class: xss
+      owasp: A03:2021
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $X
+          - pattern: $EL.outerHTML = $X
+          - pattern: document.write($X)
+          - pattern: document.writeln($X)
+
+  - id: hawaldar.xss.react-dangerous
+    message: React dangerouslySetInnerHTML. XSS class. Detection only.
+    languages: [javascript, typescript]
+    severity: WARNING
+    metadata:
+      hawaldar-class: xss
+    pattern: |
+      { dangerouslySetInnerHTML: { __html: $X } }
+
+  - id: hawaldar.ssrf.fetch
+    message: HTTP client call with a variable URL. SSRF class if URL is request-controlled. Detection only.
+    languages: [python, javascript, typescript, go]
+    severity: INFO
+    metadata:
+      hawaldar-class: ssrf
+      owasp: A10:2021
+    patterns:
+      - pattern-either:
+          - pattern: requests.get($URL)
+          - pattern: requests.post($URL)
+          - pattern: urllib.request.urlopen($URL)
+          - pattern: fetch($URL)
+          - pattern: axios.get($URL)
+          - pattern: http.get($URL)
+
+  - id: hawaldar.auth.hardcoded-secret
+    message: Hardcoded credential or JWT-like secret. Auth class. Detection only. Do not print secret values in reports.
+    languages: [python, javascript, typescript, go, java, ruby, php]
+    severity: WARNING
+    metadata:
+      hawaldar-class: auth
+      owasp: A07:2021
+    patterns:
+      - pattern-either:
+          - pattern: password = "..."
+          - pattern: SECRET_KEY = "..."
+          - pattern: jwt_secret = "..."
+          - pattern: api_key = "..."
+          - pattern: const password = "..."
+          - pattern: const jwtSecret = "..."

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Podman — Hawaldar</title>
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="index.html">Hawaldar</a>
+      <nav>
+        <a href="getting-started.html">Getting started</a>
+        <a href="install.html">Install</a>
+        <a href="podman.html">Podman</a>
+        <a href="legal.html">Legal</a>
+        <a href="building.html">Build from source</a>
+        <a href="releasing.html">Releasing</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>Podman</h1>
+    <p class="note">Hawaldar requires a container engine. Tools never run on the host. If Podman is missing, scans do not start.</p>
+    <h2>In-app setup</h2>
+    <p>Use <strong>Set up Podman</strong> in Runtime (or Settings → Runtime). That is the supported path — not a wiki of copy-paste commands.</p>
+    <ul>
+      <li><strong>Windows</strong> — winget or the official MSI. Needs WSL or Hyper-V. A UAC prompt is normal. Hawaldar does not silently install Podman.</li>
+      <li><strong>macOS</strong> — installs Podman and starts the machine VM.</li>
+      <li><strong>Linux</strong> — locates an existing engine. No sudo package install from the app.</li>
+    </ul>
+    <h2>Docker</h2>
+    <p>If Docker is already installed, you can choose <strong>Use Docker instead</strong>. Hawaldar does not install Docker Desktop.</p>
+    <h2>Workspace</h2>
+    <p>Tool containers bind-mount <code>~/.hawaldar/workspace</code> at <code>/workspace</code>. Drop pcaps and source there. Images are pulled on demand after HITL approval.</p>
+  </main>
+  <footer><div class="wrap"><a href="index.html">Home</a></div></footer>
+</body>
+</html>

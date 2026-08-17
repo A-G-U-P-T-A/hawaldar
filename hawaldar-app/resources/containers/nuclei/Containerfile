@@ -1,0 +1,23 @@
+# Nuclei binary + baked template snapshot. Templates used to download on first
+# run, but codeload.github.com is unreachable/rate-limited from pasta-run
+# containers on WSL2 (Client.Timeout awaiting headers), leaving FTL
+# "no templates provided". 3.11.x: old binaries (≤3.3.x) also fail to parse
+# current template releases. Only http/ templates are baked (tech/dns/
+# discovery scans) — keeps the image reasonable.
+ARG VERSION=3.11.1
+ARG TEMPLATES_VERSION=10.4.7
+FROM docker.io/library/alpine:3.20 AS down
+ARG VERSION
+ARG TEMPLATES_VERSION
+RUN apk add --no-cache curl ca-certificates unzip git \
+	&& curl -fsSL "https://github.com/projectdiscovery/nuclei/releases/download/v${VERSION}/nuclei_${VERSION}_linux_amd64.zip" -o /tmp/t.zip \
+	&& unzip -j /tmp/t.zip nuclei -d /usr/local/bin \
+	&& chmod +x /usr/local/bin/nuclei \
+	&& git clone --depth 1 --filter=blob:none --sparse --branch "v${TEMPLATES_VERSION}" \
+		"https://github.com/projectdiscovery/nuclei-templates.git" /tpl \
+	&& git -C /tpl sparse-checkout set http
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates && rm -rf /var/cache/apk/*
+COPY --from=down /usr/local/bin/nuclei /usr/local/bin/nuclei
+COPY --from=down /tpl /root/nuclei-templates
+ENTRYPOINT ["nuclei"]

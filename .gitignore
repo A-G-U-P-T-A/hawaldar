@@ -11,6 +11,11 @@ coverage
 .env
 .env.*
 !.env.example
+*.pfx
+*.p12
+*.pvk
+*.spc
+release
 .hawaldar
 .data
 *.db
