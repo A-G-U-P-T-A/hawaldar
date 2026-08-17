@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "description": "Hawaldar — authorized reconnaissance workstation (standalone Electron)",
   "license": "Apache-2.0",
-  "author": "Hawaldar contributors",
+  "homepage": "https://github.com/A-G-U-P-T-A/hawaldar",
+  "author": {
+    "name": "Hawaldar contributors",
+    "email": "hawaldar@users.noreply.github.com"
+  },
   "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
@@ -83,16 +87,25 @@
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
+      "identity": null,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "target": [
-        "dmg",
-        "zip"
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64"]
+        }
       ]
     },
     "linux": {
       "icon": "resources/brand/hawaldar.png",
       "category": "Development",
+      "desktopName": "Hawaldar",
+      "maintainer": "Hawaldar contributors <hawaldar@users.noreply.github.com>",
       "synopsis": "Authorized reconnaissance workstation. Requires Podman.",
       "description": "Hawaldar requires Podman (or Docker if already installed). Without a container engine, tools do not run. After install, open the app and use Set up Podman.",
       "target": [

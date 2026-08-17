@@ -6,12 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      channel:
-        description: Release channel
-        type: choice
-        default: beta
-        options:
-          - beta
+      tag:
+        description: Existing git tag to attach artifacts to (does not create a new version)
+        type: string
+        default: v0.1.0-beta.1
 
 permissions:
   contents: write
@@ -29,8 +27,8 @@ jobs:
             name: windows-x64
             cmd: npx electron-builder --win nsis --x64 --publish never
           - os: macos-latest
-            name: macos-universal
-            cmd: npx electron-builder --mac dmg zip --universal --publish never
+            name: macos-arm64
+            cmd: npx electron-builder --mac dmg zip --arm64 --publish never
           - os: ubuntu-latest
             name: linux-x64
             cmd: npx electron-builder --linux AppImage deb --x64 --publish never
@@ -45,10 +43,26 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: hawaldar-app/package-lock.json
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot dpkg-dev
+      - name: Sync license files from repo root
+        shell: bash
+        run: |
+          for f in LICENSE NOTICE LICENSE-USAGE.md; do
+            if [[ ! -f "$f" && -f "../$f" ]]; then
+              cp "../$f" "$f"
+            fi
+          done
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
       - name: Package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: ${{ matrix.cmd }}
       - uses: actions/upload-artifact@v4
         with:
@@ -72,14 +86,15 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create prerelease
+      - name: Create or update prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            TAG="v0.1.0-beta.${GITHUB_RUN_NUMBER}"
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
           fi
           NOTES="$(cat <<'EOF'
           Hawaldar beta.
