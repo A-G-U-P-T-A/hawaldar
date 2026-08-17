@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Releasing — Hawaldar</title>
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="index.html">Hawaldar</a>
+      <nav>
+        <a href="getting-started.html">Getting started</a>
+        <a href="install.html">Install</a>
+        <a href="podman.html">Podman</a>
+        <a href="legal.html">Legal</a>
+        <a href="building.html">Build from source</a>
+        <a href="releasing.html">Releasing</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>Releasing</h1>
+    <p>CI builds unsigned <strong>beta / prerelease</strong> artifacts. That is OK. Signing comes later via repository secrets — never commit certs or <code>.env</code> files.</p>
+    <h2>Trigger</h2>
+    <ul>
+      <li>Push a tag matching <code>v*</code> (example <code>v0.1.0-beta.1</code>)</li>
+      <li>Or Actions → Release → Run workflow (channel: beta)</li>
+    </ul>
+    <h2>Matrix</h2>
+    <ul>
+      <li>Windows x64 NSIS (ia32 skipped; Electron 43)</li>
+      <li>macOS universal DMG + ZIP when practical</li>
+      <li>Linux x64 AppImage + deb. Linux arm64 is off by default.</li>
+    </ul>
+    <p><code>CSC_IDENTITY_AUTO_DISCOVERY=false</code> so unsigned CI does not fail looking for a cert.</p>
+    <h2>Signing later</h2>
+    <p>Set these as GitHub Actions secrets when you have certificates. Do not put them in the repo.</p>
+    <ul>
+      <li><code>CSC_LINK</code> / <code>CSC_KEY_PASSWORD</code> — Windows and/or macOS .p12</li>
+      <li><code>APPLE_ID</code>, <code>APPLE_APP_SPECIFIC_PASSWORD</code>, <code>APPLE_TEAM_ID</code> — notarization</li>
+    </ul>
+    <p>Windows taskbar grouping uses <code>app.setAppUserModelId('com.hawaldar.app')</code>. That does not replace Authenticode. Until secrets exist, SmartScreen / Gatekeeper warnings are expected.</p>
+    <h2>Local</h2>
+    <pre><code>cd hawaldar-app
+scripts\dist.bat</code></pre>
+  </main>
+  <footer><div class="wrap"><a href="index.html">Home</a></div></footer>
+</body>
+</html>

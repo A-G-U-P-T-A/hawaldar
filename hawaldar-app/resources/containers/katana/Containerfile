@@ -1,0 +1,11 @@
+ARG VERSION=1.1.1
+FROM docker.io/library/alpine:3.20 AS down
+ARG VERSION
+RUN apk add --no-cache curl ca-certificates unzip \
+	&& curl -fsSL "https://github.com/projectdiscovery/katana/releases/download/v${VERSION}/katana_${VERSION}_linux_amd64.zip" -o /tmp/t.zip \
+	&& unzip -j /tmp/t.zip katana -d /usr/local/bin \
+	&& chmod +x /usr/local/bin/katana
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates gcompat && rm -rf /var/cache/apk/*
+COPY --from=down /usr/local/bin/katana /usr/local/bin/katana
+ENTRYPOINT ["/usr/local/bin/katana"]

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Install — Hawaldar</title>
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="index.html">Hawaldar</a>
+      <nav>
+        <a href="getting-started.html">Getting started</a>
+        <a href="install.html">Install</a>
+        <a href="podman.html">Podman</a>
+        <a href="legal.html">Legal</a>
+        <a href="building.html">Build from source</a>
+        <a href="releasing.html">Releasing</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>Install</h1>
+    <p>Beta installers are attached to <a href="https://github.com/A-G-U-P-T-A/hawaldar/releases">GitHub Releases</a> (prerelease). Builds are unsigned until code-signing secrets are configured — Windows SmartScreen and macOS Gatekeeper will warn. That is expected.</p>
+    <h2>Windows</h2>
+    <ul>
+      <li>Download <code>Hawaldar Setup 0.1.x.exe</code> (NSIS, x64). ia32 is not shipped (Electron 43).</li>
+      <li>Optional arm64 artifacts appear only when the release workflow produced them.</li>
+      <li>After install, open the app → Set up Podman. Windows needs WSL or Hyper-V. The installer does not install Podman.</li>
+    </ul>
+    <h2>macOS</h2>
+    <ul>
+      <li>Download the <code>.dmg</code> or <code>.zip</code>. CI prefers a universal (x64 + arm64) build when the macOS runner can produce it.</li>
+      <li>Unsigned / not notarized: right-click Open, or clear quarantine after you have verified the checksum from the release notes.</li>
+      <li>Then Set up Podman in the app (installs Podman and starts the VM).</li>
+    </ul>
+    <h2>Linux</h2>
+    <ul>
+      <li>AppImage or <code>.deb</code> for x64. arm64 Linux packages are not in the default matrix (too fragile on ubuntu-latest).</li>
+      <li>Install Podman from your distro (Hawaldar will not sudo-install packages).</li>
+    </ul>
+    <p>Prefer building from source? See <a href="building.html">Building from source</a>.</p>
+  </main>
+  <footer><div class="wrap"><a href="index.html">Home</a></div></footer>
+</body>
+</html>

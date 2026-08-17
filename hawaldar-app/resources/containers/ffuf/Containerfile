@@ -1,0 +1,14 @@
+# Minimal ffuf — static binary on Alpine.
+ARG FFUF_VERSION=2.1.0
+FROM docker.io/library/alpine:3.20 AS down
+ARG FFUF_VERSION
+RUN apk add --no-cache curl ca-certificates \
+	&& curl -fsSL "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" \
+		| tar -xz -C /usr/local/bin ffuf \
+	&& chmod +x /usr/local/bin/ffuf
+
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates \
+	&& rm -rf /var/cache/apk/*
+COPY --from=down /usr/local/bin/ffuf /usr/local/bin/ffuf
+ENTRYPOINT ["ffuf"]

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Legal — Hawaldar</title>
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="index.html">Hawaldar</a>
+      <nav>
+        <a href="getting-started.html">Getting started</a>
+        <a href="install.html">Install</a>
+        <a href="podman.html">Podman</a>
+        <a href="legal.html">Legal</a>
+        <a href="building.html">Build from source</a>
+        <a href="releasing.html">Releasing</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>Legal</h1>
+    <p>Canonical legal text is English. UI translations (Settings → language) do not change LICENSE, NOTICE, or LICENSE-USAGE.md.</p>
+    <h2>Apache License 2.0</h2>
+    <p>The software is licensed under <a href="https://github.com/A-G-U-P-T-A/hawaldar/blob/main/LICENSE">Apache-2.0</a>. That includes a copyright license and an express patent grant. Companies may use, modify, and distribute the code under that license. <a href="https://github.com/A-G-U-P-T-A/hawaldar/blob/main/NOTICE">NOTICE</a> is attribution only.</p>
+    <h2>Authorized use</h2>
+    <p><a href="https://github.com/A-G-U-P-T-A/hawaldar/blob/main/LICENSE-USAGE.md">LICENSE-USAGE.md</a> is not a clickwrap and not a substitute for Apache-2.0. Use Hawaldar only when you have a lawful basis: systems you own or administer, written permission, or a contracted engagement. Unauthorized scanning can be a crime. You own scope, approvals, and local law.</p>
+    <h2>First-run Legal gate</h2>
+    <p>The app records acceptance in <code>~/.hawaldar/settings.json</code> (<code>legalVersion</code>, <code>legalAcceptedAt</code>). That record is not an engagement letter or legal advice. Decline quits.</p>
+    <h2>HITL PoC policy</h2>
+    <p>Hawaldar is not an exploit platform. Proof probes:</p>
+    <ul>
+      <li>Need explicit in-app approval, one prompt per probe</li>
+      <li>Run in the contained browser/tool image against in-scope URLs only</li>
+      <li>Refuse DELETE, data-mutating SQL, long timing delays, and cookie/storage/network exfiltration</li>
+      <li>May create benign test records (for example a throwaway user) — point them at disposable/staging targets</li>
+    </ul>
+  </main>
+  <footer><div class="wrap"><a href="index.html">Home</a></div></footer>
+</body>
+</html>

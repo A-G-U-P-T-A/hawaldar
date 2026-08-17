@@ -1,0 +1,14 @@
+# Minimal amass — static binary on Alpine.
+ARG AMASS_VERSION=4.2.0
+FROM docker.io/library/alpine:3.20 AS down
+ARG AMASS_VERSION
+RUN apk add --no-cache curl ca-certificates unzip \
+	&& curl -fsSL "https://github.com/owasp-amass/amass/releases/download/v${AMASS_VERSION}/amass_Linux_amd64.zip" -o /tmp/amass.zip \
+	&& unzip -j /tmp/amass.zip '*/amass' -d /usr/local/bin \
+	&& chmod +x /usr/local/bin/amass
+
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates \
+	&& rm -rf /var/cache/apk/*
+COPY --from=down /usr/local/bin/amass /usr/local/bin/amass
+ENTRYPOINT ["amass"]

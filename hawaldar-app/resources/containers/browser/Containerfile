@@ -1,0 +1,20 @@
+# Minimal contained Chromium for Hawaldar browser recon.
+# Distro Chromium + playwright-core (CDP). No Firefox/WebKit, no host Chrome.
+# Tag: localhost/hawaldar/browser:min
+FROM docker.io/library/node:22-bookworm-slim
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		chromium \
+		ca-certificates \
+		fonts-liberation \
+		fonts-unifont \
+	&& rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/hawaldar-browser
+COPY package.json recon.mjs ./
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+	CHROMIUM_PATH=/usr/bin/chromium
+RUN npm install --omit=dev --ignore-scripts \
+	&& npm cache clean --force \
+	&& rm -rf /root/.npm /tmp/*
+# Host calls: node /opt/hawaldar-browser/recon.mjs …
+# No ENTRYPOINT so readiness can run `node --version`.

@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        type: choice
+        default: beta
+        options:
+          - beta
+
+permissions:
+  contents: write
+
+env:
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            cmd: npx electron-builder --win nsis --x64 --publish never
+          - os: macos-latest
+            name: macos-universal
+            cmd: npx electron-builder --mac dmg zip --universal --publish never
+          - os: ubuntu-latest
+            name: linux-x64
+            cmd: npx electron-builder --linux AppImage deb --x64 --publish never
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: hawaldar-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hawaldar-app/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Package
+        run: ${{ matrix.cmd }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hawaldar-${{ matrix.name }}
+          path: |
+            hawaldar-app/release/*.exe
+            hawaldar-app/release/*.dmg
+            hawaldar-app/release/*.zip
+            hawaldar-app/release/*.AppImage
+            hawaldar-app/release/*.deb
+            hawaldar-app/release/*.yml
+            hawaldar-app/release/*.blockmap
+          if-no-files-found: warn
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="v0.1.0-beta.${GITHUB_RUN_NUMBER}"
+          fi
+          NOTES="$(cat <<'EOF'
+          Hawaldar beta.
+
+          Authorized pentest / recon workstation only. Not an exploit platform. PoC probes require in-app HITL approval.
+
+          Unsigned build — Windows SmartScreen and macOS Gatekeeper will warn until CSC_LINK / Apple notarization secrets are configured.
+
+          Apache-2.0 code license; authorized-use terms in LICENSE-USAGE.md. Legal LICENSE text is English.
+          EOF
+          )"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --prerelease --title "$TAG" --notes "$NOTES"
+          fi

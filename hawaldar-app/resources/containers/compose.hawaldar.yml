@@ -1,0 +1,110 @@
+# Hawaldar container catalog — documentation / image+mount config only.
+#
+# Do NOT `podman-compose up -d` or `docker compose up -d` this file.
+# Hawaldar runs each allowed tool with `podman run --rm` (or `docker run --rm`)
+# when a tool is called. Images use 0 RAM until then. restart: "no".
+#
+# msfrpcd / stealth nmap / OS detection / host shells /
+# credential dump / msfvenom / post-exploitation are not shipped.
+# Metasploit: search/info + auxiliary/scanner + safe check, and HITL-gated
+# exploit/* runs (sessions backgrounded with run -z / exploit -z, then
+# auto-killed via sessions -K). post/* and payload builders stay refused.
+# SQLMap ships only as the bounded sqlmap-scan runner (proof of injectability;
+# every data-extraction flag is refused host-side).
+# ZAP is the one long-running daemon: the host starts it as `hw-zap` with
+# -p 127.0.0.1:8090:8090 (loopback only) and a per-start API key. The operator
+# may proxy their own browser/Burp through 127.0.0.1:8090 while it runs.
+# Juice Shop is a pull-only lab target: toggle on in Runtime starts `hw-juice-shop`
+# with -p 127.0.0.1:3000:3000 (image bkimminich/juice-shop). Recon against
+# http://127.0.0.1:3000 — localhost is always in-scope.
+#
+# Shared workspace: host ~/.hawaldar/workspace → /workspace (read-write).
+# Same folder in every tool container — no file copying between tools.
+
+name: hawaldar
+
+networks:
+  tool:
+    # Unused at runtime. Each ephemeral run uses pasta/bridge (engine default) or none.
+
+x-workspace: &workspace
+  volumes:
+    - ${HAWALDAR_WORKSPACE_HOST:-~/.hawaldar/workspace}:/workspace
+  working_dir: /workspace
+  environment:
+    HAWALDAR_WORKSPACE: /workspace
+  restart: "no"
+  profiles: ["catalog"]
+
+services:
+  nmap:
+    <<: *workspace
+    image: localhost/hawaldar/nmap:min
+  tshark:
+    <<: *workspace
+    image: localhost/hawaldar/tshark:min
+  ghidra:
+    <<: *workspace
+    image: localhost/hawaldar/ghidra:min
+  radare:
+    <<: *workspace
+    image: localhost/hawaldar/radare:min
+  binwalk:
+    <<: *workspace
+    image: localhost/hawaldar/binwalk:min
+  subfinder:
+    <<: *workspace
+    image: localhost/hawaldar/subfinder:min
+  dnsx:
+    <<: *workspace
+    image: localhost/hawaldar/dnsx:min
+  dns:
+    <<: *workspace
+    image: localhost/hawaldar/dns:min
+  httpx:
+    <<: *workspace
+    image: localhost/hawaldar/httpx:min
+  naabu:
+    <<: *workspace
+    image: localhost/hawaldar/naabu:min
+  katana:
+    <<: *workspace
+    image: localhost/hawaldar/katana:min
+  nuclei:
+    <<: *workspace
+    image: localhost/hawaldar/nuclei:min
+  amass:
+    <<: *workspace
+    image: localhost/hawaldar/amass:min
+  ffuf:
+    <<: *workspace
+    image: localhost/hawaldar/ffuf:min
+  metasploit:
+    <<: *workspace
+    image: localhost/hawaldar/metasploit:min
+  browser:
+    <<: *workspace
+    image: localhost/hawaldar/browser:min
+  scrapling:
+    <<: *workspace
+    image: localhost/hawaldar/scrapling:min
+  semgrep:
+    <<: *workspace
+    image: localhost/hawaldar/semgrep:min
+  sqlmap:
+    <<: *workspace
+    image: localhost/hawaldar/sqlmap:min
+  # zap runs detached as hw-zap (see header), not via the ephemeral workspace mount.
+  zap:
+    image: localhost/hawaldar/zap:min
+    ports:
+      - "127.0.0.1:8090:8090"
+    restart: "no"
+    profiles: ["catalog"]
+  # juice-shop runs detached as hw-juice-shop (see header), pull-only upstream image.
+  juice-shop:
+    image: bkimminich/juice-shop
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: "no"
+    profiles: ["catalog"]

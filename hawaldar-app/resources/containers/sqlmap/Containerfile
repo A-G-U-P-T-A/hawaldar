@@ -1,0 +1,11 @@
+# Bounded SQLMap runner for Hawaldar — proof-of-injectability only.
+# The host enforces a strict flag allowlist (level/risk <= 2, techniques B/E/U/S/T,
+# fingerprint flags only); data-extraction flags are refused before the image runs.
+# Tag: localhost/hawaldar/sqlmap:min
+FROM docker.io/library/python:3.12-slim
+
+ARG SQLMAP_VERSION=1.10.7
+RUN pip install --no-cache-dir "sqlmap==${SQLMAP_VERSION}" \
+	&& rm -rf /root/.cache /tmp/*
+
+# No ENTRYPOINT — the host runs `sqlmap <allowlisted argv>` explicitly.

@@ -1,0 +1,14 @@
+# OWASP ZAP daemon for Hawaldar web scanning (proxy + spider + passive/active scan API).
+# Base: official ZAP stable image. GHCR is the primary registry (zaproxy.org docs);
+# docker.io/zaproxy/zap-stable is the interchangeable mirror.
+# Tag: localhost/hawaldar/zap:min
+FROM ghcr.io/zaproxy/zaproxy:stable
+
+# Daemon on 0.0.0.0:8090 inside the container; the host publishes 127.0.0.1:8090 only.
+# ZAP_API_KEY is generated host-side per daemon start and injected with -e (never logged).
+# api.addrs.addr.name=.* + regex=true so the host — and the operator's own browser or
+# Burp proxied through 127.0.0.1:8090 — can reach the API.
+# No browser automation: Hawaldar only calls the spider/pscan/ascan/alert REST endpoints,
+# so the selenium/client add-ons never run and ZAP never downloads Chrome or drivers.
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["exec /zap/zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.key=\"$ZAP_API_KEY\" -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"]

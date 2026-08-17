@@ -1,0 +1,25 @@
+# Slimmest practical Ghidra headless image.
+# Ghidra itself is large; we strip docs/extensions/GPL examples after unpack.
+ARG GHIDRA_VERSION=11.2.1
+ARG GHIDRA_DATE=20241105
+FROM docker.io/library/eclipse-temurin:21-jre-jammy AS down
+ARG GHIDRA_VERSION
+ARG GHIDRA_DATE
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates \
+	&& curl -fsSL "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip" -o /tmp/ghidra.zip \
+	&& unzip -q /tmp/ghidra.zip -d /opt \
+	&& mv /opt/ghidra_${GHIDRA_VERSION}_PUBLIC /opt/ghidra \
+	&& rm -rf /tmp/ghidra.zip \
+		/opt/ghidra/docs \
+		/opt/ghidra/Extensions \
+		/opt/ghidra/GPL \
+		/opt/ghidra/*.md \
+		/opt/ghidra/*.txt \
+	&& apt-get purge -y curl unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+FROM docker.io/library/eclipse-temurin:21-jre-jammy
+COPY --from=down /opt/ghidra /opt/ghidra
+ENV PATH="/opt/ghidra/support:${PATH}"
+# analyzeHeadless lives under support/
+RUN ln -sf /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless
+ENTRYPOINT ["analyzeHeadless"]

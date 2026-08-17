@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Building from source — Hawaldar</title>
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="index.html">Hawaldar</a>
+      <nav>
+        <a href="getting-started.html">Getting started</a>
+        <a href="install.html">Install</a>
+        <a href="podman.html">Podman</a>
+        <a href="legal.html">Legal</a>
+        <a href="building.html">Build from source</a>
+        <a href="releasing.html">Releasing</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>Building from source</h1>
+    <pre><code>git clone https://github.com/A-G-U-P-T-A/hawaldar.git
+cd hawaldar/hawaldar-app
+# Windows
+scripts\setup.bat
+scripts\dev.bat
+# macOS / Linux
+chmod +x scripts/*.sh
+./scripts/setup.sh
+./scripts/dev.sh</code></pre>
+    <p>Node 22+ is required. <code>setup</code> runs <code>npm ci</code>/<code>npm i</code> and restores the Electron binary via <code>scripts/ensure-electron.mjs</code>.</p>
+    <h2>Typecheck</h2>
+    <pre><code>npm run typecheck</code></pre>
+    <h2>Packaged installer</h2>
+    <pre><code>scripts\dist.bat
+# or
+./scripts/dist.sh</code></pre>
+    <p>That runs typecheck, <code>electron-vite build</code>, and electron-builder, then restores Electron so <code>npm run dev</code> still works. Output is <code>hawaldar-app/release/</code>.</p>
+    <h2>Electron uninstall after dist</h2>
+    <p>electron-builder often removes <code>node_modules/electron/path.txt</code> and the dist binary. electron-vite then throws <code>Error: Electron uninstall</code>. Fix: <code>npm run ensure-electron</code> (also hooked from <code>postinstall</code>, <code>npm run dist</code>, and the setup/dev/dist scripts).</p>
+    <p>Do not commit <code>node_modules</code>, <code>release/</code>, <code>.env</code>, or <code>~/.hawaldar</code> data.</p>
+  </main>
+  <footer><div class="wrap"><a href="index.html">Home</a></div></footer>
+</body>
+</html>

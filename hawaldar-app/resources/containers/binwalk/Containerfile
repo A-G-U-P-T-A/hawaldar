@@ -1,0 +1,5 @@
+# Minimal binwalk — Alpine + pip binwalk (no extract deps).
+FROM docker.io/library/python:3.12-alpine
+RUN pip install --no-cache-dir binwalk \
+	&& find /usr/local -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+ENTRYPOINT ["binwalk"]

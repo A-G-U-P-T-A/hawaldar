@@ -1,0 +1,5 @@
+# Minimal nmap — Alpine + nmap binary only (no NSE script pack).
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache nmap \
+	&& rm -rf /var/cache/apk/* /usr/share/nmap/scripts /usr/share/nmap/nselib
+ENTRYPOINT ["nmap"]

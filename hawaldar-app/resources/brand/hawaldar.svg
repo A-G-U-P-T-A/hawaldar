@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Shield (officer) + corner pip (recon) + rank chevron. Even coords stay crisp at 16px. -->
+  <path fill="#c9a227" d="M6 4h20v14L16 28 6 18V4z"/>
+  <path fill="#edc85a" d="M22 4h4v4h-4z"/>
+  <path fill="#f3efe4" d="M10 12l6 6 6-6-2-2-4 4-4-4z"/>
+</svg>
