@@ -4,6 +4,7 @@
   "description": "Hawaldar — authorized reconnaissance workstation (standalone Electron)",
   "license": "Apache-2.0",
   "homepage": "https://github.com/A-G-U-P-T-A/hawaldar",
+  "desktopName": "com.hawaldar.app",
   "author": {
     "name": "Hawaldar contributors",
     "email": "hawaldar@users.noreply.github.com"
@@ -104,7 +105,6 @@
     "linux": {
       "icon": "resources/brand/hawaldar.png",
       "category": "Development",
-      "desktopName": "Hawaldar",
       "maintainer": "Hawaldar contributors <hawaldar@users.noreply.github.com>",
       "synopsis": "Authorized reconnaissance workstation. Requires Podman.",
       "description": "Hawaldar requires Podman (or Docker if already installed). Without a container engine, tools do not run. After install, open the app and use Set up Podman.",
