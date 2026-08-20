@@ -2,9 +2,9 @@ name: Pages
 
 on:
   push:
-    branches: [main]
-    tags:
-      - 'v*'
+    branches:
+      - main
+      - 'release/**'
   workflow_dispatch:
 
 permissions:
@@ -35,6 +35,8 @@ jobs:
         run: git fetch --tags --force origin
       - name: Lay out versioned docs
         run: python3 .github/scripts/snapshot-docs-versions.py
+      - name: Ensure .nojekyll
+        run: printf '\n' > docs/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs

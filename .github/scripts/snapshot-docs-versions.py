@@ -34,9 +34,15 @@ def inject_script(html_path: Path) -> None:
     html_path.write_text(text, encoding="utf-8")
 
 
+def ensure_nojekyll() -> None:
+    nojekyll = DOCS / ".nojekyll"
+    if not nojekyll.exists() or nojekyll.stat().st_size == 0:
+        nojekyll.write_text("\n", encoding="utf-8")
+
+
 def copy_shared(dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
-    for name in ("site.js", "site.css", "versions.json"):
+    for name in ("site.js", "site.css", "versions.json", ".nojekyll"):
         src = DOCS / name
         if src.is_file():
             shutil.copy2(src, dest / name)
@@ -73,6 +79,7 @@ def main() -> int:
         ],
     }
     (DOCS / "versions.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    ensure_nojekyll()
 
     latest_dir = DOCS / latest
     latest_dir.mkdir(parents=True, exist_ok=True)

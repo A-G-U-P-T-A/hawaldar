@@ -35,7 +35,7 @@
       <li>Push a tag matching <code>v*</code> (example <code>v0.1.0-beta.2</code>)</li>
       <li>Or Actions → Release → Run workflow and pass the existing tag</li>
     </ul>
-    <p>The same tag also republishes GitHub Pages. Latest docs stay at the site root; a copy is published under <code>/v0.1.0-beta.2/</code> (and older tags under <code>/v…/</code>). The header version menu switches between them.</p>
+    <p>GitHub Pages deploys from <code>main</code> or <code>release/*</code> (the <code>github-pages</code> environment rejects tag refs). The Pages job snapshots each <code>v*</code> tag under <code>/v0.1.0-beta.2/</code> (and older tags under <code>/v…/</code>). Latest docs stay at the site root. The header version menu switches between them.</p>
     <h2>Matrix</h2>
     <ul>
       <li>Windows x64 NSIS (ia32 skipped; Electron 43)</li>
