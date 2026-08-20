@@ -130,6 +130,8 @@ export interface SettingsDTO {
 	sessionTtlDays: number;
 	/** UI chrome locale. Legal LICENSE text stays English. */
 	locale: string;
+	/** Chrome theme. Default dark. */
+	theme: 'dark' | 'light';
 }
 
 export interface LegalDocumentDTO {
@@ -166,6 +168,7 @@ export interface SettingsWrite {
 	thinking?: boolean;
 	sessionTtlDays?: number;
 	locale?: string;
+	theme?: 'dark' | 'light';
 }
 
 export interface PodmanMachineDTO {
@@ -510,7 +513,14 @@ export interface KnowledgeGraphDTO {
 
 export type FindingClass = 'injection' | 'xss' | 'ssrf' | 'auth' | 'csrf' | 'ssti' | 'idor' | 'version' | 'other';
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
-export type FindingStatus = 'hypothesis' | 'validating' | 'confirmed' | 'unconfirmed' | 'not-exploitable';
+export type FindingStatus =
+	| 'hypothesis'
+	| 'validating'
+	| 'confirmed'
+	| 'unconfirmed'
+	| 'not-exploitable'
+	| 'informed'
+	| 'fixed';
 
 export interface FindingDTO {
 	id: string;
@@ -529,14 +539,58 @@ export interface FindingDTO {
 		status?: number;
 		response?: string;
 		tool?: string;
+		payload?: string;
+		actions?: Array<{ op: string; selector?: string; value?: string; ms?: number }>;
 	};
 	impact: string;
 	remediation: string;
 	references: string[];
 	source: string;
 	sessionId: string;
+	runId: string;
+	reportId: string;
+	informedAt: number;
 	createdAt: number;
 	updatedAt: number;
+}
+
+export interface FindingFilterDTO {
+	status?: FindingStatus;
+	vulnClass?: FindingClass;
+	query?: string;
+	sessionId?: string;
+	runId?: string;
+	includeUnassigned?: boolean;
+	target?: string;
+	limit?: number;
+}
+
+export interface ReportDTO {
+	id: string;
+	title: string;
+	target: string;
+	sessionId: string;
+	chatTitle: string;
+	runId: string;
+	filePath: string;
+	findingIds: string[];
+	query: string;
+	createdAt: number;
+}
+
+export interface ReportFilterDTO {
+	query?: string;
+	target?: string;
+	sessionId?: string;
+}
+
+export interface FindingRetestResult {
+	ok: boolean;
+	verdict: 'fixed' | 'still-open' | 'aborted';
+	reason: string;
+	id: string;
+	status: FindingStatus;
+	offerReport: boolean;
 }
 
 export type EngagementPhaseStatus = 'pending' | 'active' | 'done' | 'failed' | 'skipped';
@@ -567,10 +621,29 @@ export interface HawaldarAPI {
 	onChatDelta: (cb: (ev: ChatDeltaEvent) => void) => () => void;
 	onChatActivity: (cb: (ev: ChatActivityEvent) => void) => () => void;
 	runWorkflow: (key: string, input: Record<string, unknown>) => Promise<string>;
-	listFindings: () => Promise<FindingDTO[]>;
+	listFindings: (filter?: FindingFilterDTO) => Promise<FindingDTO[]>;
 	removeFinding: (id: string) => Promise<void>;
 	clearFindings: () => Promise<number>;
-	exportFindingsReport: (input?: { title?: string; target?: string }) => Promise<{ path: string; displayPath: string; findings: number }>;
+	exportFindingsReport: (input?: {
+		title?: string;
+		target?: string;
+		sessionId?: string;
+		runId?: string;
+		query?: string;
+	}) => Promise<{ id: string; title?: string; path: string; displayPath: string; findings: number }>;
+	informFinding: (id: string) => Promise<FindingDTO>;
+	retestFinding: (id: string) => Promise<FindingRetestResult>;
+	listReports: (filter?: ReportFilterDTO) => Promise<ReportDTO[]>;
+	createReport: (input?: {
+		title?: string;
+		target?: string;
+		sessionId?: string;
+		runId?: string;
+		query?: string;
+	}) => Promise<{ id: string; title?: string; path: string; displayPath: string; findings: number }>;
+	readReport: (id: string) => Promise<ArrayBuffer>;
+	removeReport: (id: string) => Promise<void>;
+	onReportsChanged: (cb: () => void) => () => void;
 	getEngagementState: () => Promise<EngagementRunDTO | null>;
 	onFindingsChanged: (cb: () => void) => () => void;
 	onEngagementEvent: (cb: (run: EngagementRunDTO) => void) => () => void;

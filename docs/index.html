@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hawaldar — authorized recon workstation</title>
   <link rel="stylesheet" href="site.css" />
+  <script src="site.js" defer></script>
 </head>
 <body>
   <header>
@@ -18,12 +19,29 @@
         <a href="building.html">Build from source</a>
         <a href="releasing.html">Releasing</a>
       </nav>
+      <label class="version-wrap">
+        <select class="version-select" aria-label="Documentation version">
+          <option value="v0.1.0-beta.2" selected>v0.1.0-beta.2 (latest)</option>
+          <option value="v0.1.0-beta.1">v0.1.0-beta.1</option>
+        </select>
+      </label>
     </div>
   </header>
   <main class="wrap">
     <h1>Hawaldar</h1>
     <p>A local Electron workstation for <strong>authorized</strong> reconnaissance and bounded proof-of-concept validation. Policy owns scope. Tools run only in Podman (or Docker if you already have it). Every intrusive PoC probe is approved in-app, one prompt per probe.</p>
     <p class="note"><strong>Not an exploit platform.</strong> There is no host shell for the model, no msfvenom, no credential dump, no SQL data extraction. HITL PoC probes refuse DELETE, data-mutating SQL, and cookie/storage exfiltration. Confirmed findings land in the Findings tab with reproduction steps.</p>
+    <h2>What’s new in v0.1.0-beta.2</h2>
+    <ul>
+      <li>Splash with one logo, Poppins, and Material icons; Home; dark/light theme</li>
+      <li>Findings scoped to the engagement; unassigned chat is a first-class thread</li>
+      <li>DevTools stay closed unless <code>HAWALDAR_DEVTOOLS=1</code></li>
+      <li>Engagement reports are structured PDFs, not a markdown dump</li>
+      <li>In-app PDF viewer via pdf.js (no Chromium PDF plugin / ERR_BLOCKED_BY_CLIENT)</li>
+      <li>Navigation guard: Juice Shop (and other in-scope) links cannot replace the Hawaldar window</li>
+      <li>This site: version menu in the header for <a href="v0.1.0-beta.2/">v0.1.0-beta.2</a> and <a href="v0.1.0-beta.1/">v0.1.0-beta.1</a></li>
+    </ul>
+    <p>Installers and notes: <a href="https://github.com/A-G-U-P-T-A/hawaldar/releases/tag/v0.1.0-beta.2">v0.1.0-beta.2 on GitHub</a>. Use the version menu to open an older beta’s pages.</p>
     <h2>License and use</h2>
     <p>Code is <a href="https://github.com/A-G-U-P-T-A/hawaldar/blob/main/LICENSE">Apache License 2.0</a>. Authorized-use terms are in <a href="https://github.com/A-G-U-P-T-A/hawaldar/blob/main/LICENSE-USAGE.md">LICENSE-USAGE.md</a> and <a href="https://github.com/A-G-U-P-T-A/hawaldar/blob/main/NOTICE">NOTICE</a>. First run shows a Legal gate. UI translations are convenience-only; legal text stays English.</p>
     <h2>Docs</h2>

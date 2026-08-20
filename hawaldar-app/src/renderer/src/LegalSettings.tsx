@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { LegalStatusDTO } from '../../preload/api';
 import { LanguagePicker, useI18n } from './i18n';
+import { ThemePicker } from './theme';
 import LegalTerms from './LegalTerms';
 
 export default function LegalSettings() {
@@ -49,6 +50,7 @@ export default function LegalSettings() {
 				<h2 className="widget-title">{t('legal.title')}</h2>
 			</div>
 			<p className="widget-help">{t('settings.languageHelp')}</p>
+			<ThemePicker id="settings-legal-theme" />
 			<LanguagePicker id="settings-legal-locale" />
 			<div className="legal-doc">
 				<LegalTerms document={legal.document} />

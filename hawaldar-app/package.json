@@ -1,6 +1,6 @@
 {
   "name": "hawaldar-app",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.2",
   "description": "Hawaldar — authorized reconnaissance workstation (standalone Electron)",
   "license": "Apache-2.0",
   "homepage": "https://github.com/A-G-U-P-T-A/hawaldar",
@@ -43,6 +43,14 @@
       {
         "from": "resources",
         "to": "resources"
+      },
+      {
+        "from": "src/renderer/splash.html",
+        "to": "resources/splash.html"
+      },
+      {
+        "from": "src/renderer/src/assets/fonts",
+        "to": "resources/fonts"
       }
     ],
     "extraFiles": [
@@ -94,11 +102,15 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         }
       ]
     },
@@ -125,6 +137,7 @@
     "@mastra/observability": "1.17.0",
     "3d-force-graph": "^1.79.0",
     "apache-arrow": "^18.1.0",
+    "pdfjs-dist": "^6.2.108",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "three": "^0.170.0",

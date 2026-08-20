@@ -8,7 +8,7 @@ import { emptyChatFallback, formatChatError } from '../core/chat-messages';
 import { loadDotenvFiles } from '../core/env-files';
 import { HawaldarRuntime } from '../core/runtime';
 import { toEpochMs } from '../core/session-meta';
-import { SettingsStore } from '../core/settings';
+import { SettingsStore, normalizeTheme } from '../core/settings';
 import { isLegalAccepted, LEGAL_DOCUMENT, LEGAL_VERSION } from '../core/legal';
 import type { LegalStatusDTO } from '../preload/api';
 import { collectHostInfo, looksLikeDockerBin } from '../core/sandbox/host-info';
@@ -34,6 +34,8 @@ import type { ChatHistoryQuery, ChatRequest, HitlAskEvent, ListModelsRequest, No
 import type { HitlAsk } from '../core/hitl';
 import { releaseHitlWaiter } from '../core/hitl-gate';
 import { PODMAN_MACHINE_SUBJECT } from '../core/approvals-store';
+import { isAllowedAppNavigation, isExternalHref, shouldPreventAppNavigation } from '../core/app-navigation';
+import { bootRendererWindow } from './load-renderer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -58,6 +60,39 @@ function brandIconPath(): string {
 	return path.join(resourcesRoot(), 'brand', 'hawaldar.png');
 }
 
+function windowChrome(theme: 'dark' | 'light'): { background: string; symbol: string } {
+	return theme === 'light'
+		? { background: '#f3f3f3', symbol: '#3b3b3b' }
+		: { background: '#1e1e1e', symbol: '#cccccc' };
+}
+
+function applyWindowTheme(win: BrowserWindow | null, theme: 'dark' | 'light'): void {
+	if (!win || win.isDestroyed()) {
+		return;
+	}
+	const chrome = windowChrome(theme);
+	win.setBackgroundColor(chrome.background);
+	try {
+		win.setTitleBarOverlay({
+			color: chrome.background,
+			symbolColor: chrome.symbol,
+			height: 36,
+		});
+	} catch {
+		// Overlay unsupported on this platform.
+	}
+}
+
+function splashHtmlPath(): string {
+	const candidates = [
+		path.join(__dirname, '../renderer/splash.html'),
+		path.join(__dirname, '../../src/renderer/splash.html'),
+		path.join(app.getAppPath(), 'src/renderer/splash.html'),
+		path.join(resourcesRoot(), 'splash.html'),
+	];
+	return candidates.find((item) => existsSync(item)) ?? '';
+}
+
 if (process.platform === 'win32') {
 	app.setAppUserModelId('com.hawaldar.app');
 	// Electron 43 + Windows: GPU-process / GPU-sandbox crashes take down Chromium's
@@ -72,6 +107,115 @@ if (process.platform === 'win32') {
 let mainWindow: BrowserWindow | null = null;
 let store: SettingsStore;
 let runtime: HawaldarRuntime;
+/** Last good Hawaldar renderer URL (Vite origin or packaged index.html). Never Juice Shop. */
+let rendererHomeUrl = '';
+let rendererReady = false;
+let restoringRenderer = false;
+const guardedContents = new WeakSet<WebContents>();
+
+function rendererUrlOption(): string {
+	return rendererHomeUrl || process.env.ELECTRON_RENDERER_URL || '';
+}
+
+function rememberRendererHome(url: string): void {
+	if (!url || /splash\.html/i.test(url)) {
+		return;
+	}
+	if (!isAllowedAppNavigation(url, { rendererUrl: process.env.ELECTRON_RENDERER_URL, isMainFrame: true })) {
+		return;
+	}
+	rendererHomeUrl = url.replace(/#.*$/, '');
+	rendererReady = true;
+}
+
+function restoreMainRenderer(win: BrowserWindow): void {
+	if (!rendererReady || restoringRenderer || win.isDestroyed() || win.webContents.isDestroyed()) {
+		return;
+	}
+	const home = rendererUrlOption();
+	if (!home) {
+		return;
+	}
+	const current = win.webContents.getURL();
+	if (isAllowedAppNavigation(current, { rendererUrl: home, isMainFrame: true })) {
+		return;
+	}
+	restoringRenderer = true;
+	console.warn('[hawaldar] restoring renderer after blocked navigation', current, '→', home);
+	void win.loadURL(home).catch((error) => {
+		console.error('[hawaldar] renderer restore failed', error);
+	}).finally(() => {
+		restoringRenderer = false;
+	});
+}
+
+function isGuestWebContents(contents: WebContents): boolean {
+	try {
+		if (contents.hostWebContents) {
+			return true;
+		}
+		const type = contents.getType();
+		return type === 'webview' || type === 'offscreen' || type === 'remote';
+	} catch {
+		return false;
+	}
+}
+
+function bindAppNavigationGuard(contents: WebContents, win?: BrowserWindow | null): void {
+	if (guardedContents.has(contents) || contents.isDestroyed()) {
+		return;
+	}
+	guardedContents.add(contents);
+
+	contents.setWindowOpenHandler(({ url }) => {
+		if (isExternalHref(url)) {
+			void shell.openExternal(url);
+		}
+		return { action: 'deny' };
+	});
+
+	const block = (event: Electron.Event, url: string, isMainFrame?: boolean): void => {
+		if (contents.isDestroyed()) {
+			return;
+		}
+		const href = String(url || '');
+		const target = win && !win.isDestroyed() ? win : mainWindow;
+		const isAppWindow = !!(target && !target.isDestroyed() && contents === target.webContents);
+		// Guest detection at web-contents-created is too early (hostWebContents is
+		// unset). Re-check here and never cancel guest/PDF-plugin navigations.
+		if (!isAppWindow || isGuestWebContents(contents)) {
+			return;
+		}
+		if (!shouldPreventAppNavigation({
+			url: href,
+			isMainFrame,
+			rendererUrl: rendererUrlOption(),
+		})) {
+			return;
+		}
+		event.preventDefault();
+		console.warn('[hawaldar] blocked navigation', { url: href, isMainFrame });
+		if (isExternalHref(href)) {
+			void shell.openExternal(href);
+		}
+		if (isMainFrame) {
+			restoreMainRenderer(target);
+		}
+	};
+
+	contents.on('will-navigate', (details, url) => {
+		const rec = details as Electron.Event & { url?: string; isMainFrame?: boolean };
+		const href = String(rec.url || url || '');
+		const isMainFrame = typeof rec.isMainFrame === 'boolean' ? rec.isMainFrame : true;
+		block(details, href, isMainFrame);
+	});
+	contents.on('will-redirect', (details) => {
+		block(details, String(details.url || ''), details.isMainFrame);
+	});
+	contents.on('will-frame-navigate', (details) => {
+		block(details, String(details.url || ''), details.isMainFrame);
+	});
+}
 
 type QuitPhase = 'idle' | 'asking' | 'tearing-down' | 'confirmed';
 let quitPhase: QuitPhase = 'idle';
@@ -364,8 +508,22 @@ function preloadScript(): string {
 	return path.join(__dirname, '../preload/index.js');
 }
 
-function isRendererDev(): boolean {
-	return Boolean(process.env.ELECTRON_RENDERER_URL);
+function shouldOpenDevTools(): boolean {
+	if (app.isPackaged) {
+		return false;
+	}
+	return process.env.HAWALDAR_DEVTOOLS === '1';
+}
+
+function openDevToolsIfEnabled(win: BrowserWindow): void {
+	if (!shouldOpenDevTools() || win.isDestroyed() || win.webContents.isDestroyed()) {
+		return;
+	}
+	try {
+		win.webContents.openDevTools({ mode: 'detach' });
+	} catch (error) {
+		console.error('[hawaldar] openDevTools failed', error);
+	}
 }
 
 function createWindow(): void {
@@ -420,11 +578,28 @@ function createWindow(): void {
 			reveal('timeout');
 		}
 	}, 8_000);
+	bindAppNavigationGuard(win.webContents, win);
 	win.webContents.on('did-finish-load', () => {
-		console.log('[hawaldar] did-finish-load', win.webContents.getURL());
+		const url = win.webContents.getURL();
+		console.log('[hawaldar] did-finish-load', url);
+		rememberRendererHome(url);
+		if (rendererReady && !isAllowedAppNavigation(url, { rendererUrl: rendererUrlOption(), isMainFrame: true })) {
+			restoreMainRenderer(win);
+		}
+	});
+	win.webContents.on('did-navigate', (_event, url) => {
+		if (isAllowedAppNavigation(url, { rendererUrl: rendererUrlOption(), isMainFrame: true })) {
+			rememberRendererHome(url);
+			return;
+		}
+		restoreMainRenderer(win);
 	});
 	win.webContents.on('did-fail-load', (_event, code, desc, url, isMainFrame) => {
 		console.error('[hawaldar] did-fail-load', { code, desc, url, isMainFrame });
+		if (isMainFrame && url && !isAllowedAppNavigation(url, { rendererUrl: rendererUrlOption(), isMainFrame: true })) {
+			restoreMainRenderer(win);
+			return;
+		}
 		reveal('did-fail-load');
 	});
 	win.webContents.on('render-process-gone', (_event, details) => {
@@ -440,10 +615,6 @@ function createWindow(): void {
 			console.error('[renderer]', message, event.lineNumber ? `${event.sourceId}:${event.lineNumber}` : '');
 		}
 	});
-	if (isRendererDev()) {
-		win.webContents.openDevTools({ mode: 'detach' });
-	}
-
 	const menu = Menu.getApplicationMenu();
 	if (menu) {
 		win.setMenu(menu);
@@ -452,28 +623,27 @@ function createWindow(): void {
 	win.webContents.on('context-menu', (event) => {
 		event.preventDefault();
 	});
-	win.webContents.setWindowOpenHandler(({ url }) => {
-		if (/^https?:\/\//i.test(url)) {
-			void shell.openExternal(url);
-		}
-		return { action: 'deny' };
-	});
 
-	const rendererUrl = process.env.ELECTRON_RENDERER_URL;
-	if (rendererUrl) {
-		console.log('[hawaldar] loadURL', rendererUrl);
-		void win.loadURL(rendererUrl).catch((error) => {
-			console.error('[hawaldar] loadURL failed', error);
-			reveal('loadURL-error');
+	void (async () => {
+		const settings = await store.read().catch(() => null);
+		const theme = normalizeTheme(settings?.theme);
+		applyWindowTheme(win, theme);
+		await bootRendererWindow(win, {
+			rendererUrl: process.env.ELECTRON_RENDERER_URL,
+			indexHtml: path.join(__dirname, '../renderer/index.html'),
+			splashHtml: splashHtmlPath(),
+			brandPath: brandIconPath(),
+			theme,
 		});
-	} else {
-		const html = path.join(__dirname, '../renderer/index.html');
-		console.log('[hawaldar] loadFile', html);
-		void win.loadFile(html).catch((error) => {
-			console.error('[hawaldar] loadFile failed', error);
-			reveal('loadFile-error');
-		});
-	}
+		if (!win.isDestroyed()) {
+			rememberRendererHome(win.webContents.getURL());
+		}
+	})().catch((error) => {
+		console.error('[hawaldar] renderer boot failed', error);
+		reveal('renderer-boot-error');
+	}).finally(() => {
+		openDevToolsIfEnabled(win);
+	});
 
 	win.on('close', (event) => {
 		if (quitPhase === 'confirmed') {
@@ -759,9 +929,16 @@ function registerIpc(): void {
 		}
 	});
 
-	ipcMain.handle('findings.list', async () => {
+	ipcMain.handle('findings.list', async (_e, filter?: {
+		sessionId?: string;
+		runId?: string;
+		target?: string;
+		query?: string;
+		status?: string;
+		vulnClass?: string;
+	}) => {
 		await runtime.ready;
-		return runtime.listFindings();
+		return runtime.listFindings(filter as Parameters<typeof runtime.listFindings>[0]);
 	});
 
 	ipcMain.handle('findings.remove', async (_e, id: string) => {
@@ -776,10 +953,60 @@ function registerIpc(): void {
 		return runtime.clearFindings();
 	});
 
-	ipcMain.handle('findings.export', async (_e, input?: { title?: string; target?: string }) => {
+	ipcMain.handle('findings.export', async (_e, input?: {
+		title?: string;
+		target?: string;
+		sessionId?: string;
+		runId?: string;
+		query?: string;
+	}) => {
 		await requireLegal();
 		await runtime.ready;
 		return runtime.exportFindingsReport(input);
+	});
+
+	ipcMain.handle('findings.inform', async (_e, id: string) => {
+		await requireLegal();
+		await runtime.ready;
+		return runtime.informFinding(String(id || ''));
+	});
+
+	ipcMain.handle('findings.retest', async (event, id: string) => {
+		await requireLegal();
+		await runtime.ready;
+		return await runtime.withActivity(() => undefined, () => runtime.withHitl(
+			(req) => askRendererHitl(event.sender, req),
+			() => runtime.retestFinding(String(id || '')),
+		));
+	});
+
+	ipcMain.handle('reports.list', async (_e, filter?: { query?: string; target?: string; sessionId?: string }) => {
+		await runtime.ready;
+		return runtime.listReports(filter);
+	});
+
+	ipcMain.handle('reports.create', async (_e, input?: {
+		title?: string;
+		target?: string;
+		sessionId?: string;
+		runId?: string;
+		query?: string;
+	}) => {
+		await requireLegal();
+		await runtime.ready;
+		return runtime.createFindingsReport(input);
+	});
+
+	ipcMain.handle('reports.read', async (_e, id: string) => {
+		await runtime.ready;
+		const bytes = await runtime.readReport(String(id || ''));
+		return Buffer.from(bytes);
+	});
+
+	ipcMain.handle('reports.remove', async (_e, id: string) => {
+		await requireLegal();
+		await runtime.ready;
+		await runtime.removeReport(String(id || ''));
 	});
 
 	ipcMain.handle('engagement.get', async () => {
@@ -837,13 +1064,15 @@ function registerIpc(): void {
 			thinking: s.thinking === true,
 			sessionTtlDays: s.sessionTtlDays,
 			locale: s.locale || 'en',
+			theme: s.theme === 'light' ? 'light' as const : 'dark' as const,
 		};
 	};
 
 	ipcMain.handle('settings.read', async () => settingsDto());
 
 	ipcMain.handle('settings.write', async (_e, patch: SettingsWrite) => {
-		await store.write(patch);
+		const next = await store.write(patch);
+		applyWindowTheme(mainWindow, next.theme);
 		await runtime.reload();
 		return settingsDto();
 	});
@@ -1482,8 +1711,14 @@ app.whenReady().then(() => {
 	runtime.onFindingsChanged(() => {
 		sendToRenderer('findings.changed');
 	});
+	runtime.onReportsChanged(() => {
+		sendToRenderer('reports.changed');
+	});
 	registerIpc();
 	installApplicationMenu();
+	app.on('web-contents-created', (_event, contents) => {
+		bindAppNavigationGuard(contents, mainWindow);
+	});
 	createWindow();
 	void runtime.ready.then(() => runtime.purgeStaleThreads()).catch(() => {});
 	setInterval(() => {

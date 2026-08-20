@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hawaldar</title>
+    <style>
+      :root,
+      [data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #1e1e1e;
+        --bg-elevated: #252526;
+        --bg-hover: rgba(255, 255, 255, 0.045);
+        --border: rgba(255, 255, 255, 0.08);
+        --border-subtle: rgba(255, 255, 255, 0.05);
+        --text: #cccccc;
+        --text-strong: #f3f3f3;
+        --muted: #9d9d9d;
+        --muted-2: #8a8a8a;
+        --accent: #0078d4;
+        --titlebar-h: 36px;
+        --radius-sm: 10px;
+        --font-ui: "Poppins", system-ui, sans-serif;
+        --text-sm: 12px;
+        --text-md: 13px;
+        --text-lg: 14px;
+        --chrome-outline: rgba(255, 255, 255, 0.12);
+        --rail-ease: cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      [data-theme="light"] {
+        color-scheme: light;
+        --bg: #f3f3f3;
+        --bg-elevated: #ffffff;
+        --bg-hover: rgba(0, 0, 0, 0.05);
+        --border: rgba(0, 0, 0, 0.14);
+        --border-subtle: rgba(0, 0, 0, 0.08);
+        --text: #3b3b3b;
+        --text-strong: #1a1a1a;
+        --muted: #5c5c5c;
+        --muted-2: #6e6e6e;
+        --accent: #005fb8;
+        --chrome-outline: rgba(0, 0, 0, 0.16);
+      }
+      @font-face {
+        font-family: "Poppins";
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url("./fonts/Poppins-Regular.ttf") format("truetype");
+      }
+      @font-face {
+        font-family: "Poppins";
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url("./fonts/Poppins-Bold.ttf") format("truetype");
+      }
+      @font-face {
+        font-family: "Material Symbols Outlined";
+        font-style: normal;
+        font-weight: 100 700;
+        font-display: block;
+        src: url("./fonts/MaterialSymbolsOutlined.woff2") format("woff2");
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-ui);
+        font-size: var(--text-sm);
+        -webkit-font-smoothing: antialiased;
+      }
+      body.splash {
+        display: grid;
+        grid-template-rows: env(titlebar-area-height, var(--titlebar-h)) 1fr;
+        overflow: hidden;
+      }
+      .app-titlebar {
+        display: flex;
+        align-items: center;
+        height: env(titlebar-area-height, var(--titlebar-h));
+        padding: 0 12px;
+        padding-left: max(12px, env(titlebar-area-x, 12px));
+        padding-right: max(140px, calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px) + 12px));
+        background: var(--bg);
+        border-bottom: 1px solid var(--border-subtle);
+        -webkit-app-region: drag;
+        user-select: none;
+      }
+      .app-titlebar .product {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        color: var(--text-strong);
+        letter-spacing: 0.02em;
+      }
+      .app-titlebar .product-meta {
+        font-weight: 400;
+        color: var(--muted-2);
+      }
+      .hw-boot {
+        position: relative;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        padding: 32px 24px 48px;
+      }
+      .hw-boot-mark {
+        width: 56px;
+        height: 56px;
+        flex-shrink: 0;
+        overflow: hidden;
+        animation: hw-boot-pulse 1.6s ease-in-out infinite;
+      }
+      .hw-boot-mark img {
+        width: 56px;
+        height: 56px;
+        display: block;
+        object-fit: contain;
+      }
+      .hw-boot-mark[hidden],
+      .hw-boot-mark img[hidden] {
+        display: none !important;
+      }
+      .hw-boot-title {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--text-strong);
+      }
+      .hw-boot-status {
+        margin: 0;
+        color: var(--muted);
+        min-height: 1.4em;
+      }
+      .hw-boot-spinner {
+        width: 22px;
+        height: 22px;
+        border: 2px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: hw-boot-spin 0.8s linear infinite;
+      }
+      .hw-boot-tips {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: min(36rem, calc(100% - 32px));
+        -webkit-app-region: no-drag;
+      }
+      .hw-boot-viewport {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-sm);
+        background: var(--bg-elevated);
+      }
+      .hw-boot-track {
+        display: flex;
+        transition: transform 280ms var(--rail-ease);
+      }
+      .hw-boot-tip {
+        flex: 0 0 100%;
+        margin: 0;
+        padding: 14px 16px;
+        text-align: center;
+        color: var(--text);
+        font-size: var(--text-md);
+        line-height: 1.45;
+      }
+      .hw-boot-nav {
+        width: 28px;
+        height: 28px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .hw-boot-nav:hover,
+      .hw-boot-nav:focus-visible {
+        background: var(--bg-hover);
+        color: var(--text-strong);
+        box-shadow: 0 0 0 1px var(--chrome-outline);
+        outline: none;
+      }
+      .ms-icon {
+        font-family: "Material Symbols Outlined";
+        font-weight: 400;
+        font-style: normal;
+        font-size: 20px;
+        width: 20px;
+        height: 20px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 20;
+        font-feature-settings: "liga";
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+      }
+      .hw-boot-dots {
+        display: flex;
+        gap: 6px;
+      }
+      .hw-boot-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--muted-2);
+      }
+      .hw-boot-dot.is-active {
+        background: var(--accent);
+      }
+      .hw-boot-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      @keyframes hw-boot-spin {
+        to { transform: rotate(360deg); }
+      }
+      @keyframes hw-boot-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.62; }
+      }
+    </style>
+  </head>
+  <body class="splash">
+    <div class="app-titlebar">
+      <div class="product">
+        Hawaldar
+        <span class="product-meta">authorized recon</span>
+      </div>
+    </div>
+    <div class="hw-boot">
+      <div class="hw-boot-mark" id="brand-mark" aria-hidden="true">
+        <img id="brand-img" alt="" hidden />
+      </div>
+      <h1 class="hw-boot-title">Hawaldar</h1>
+      <div class="hw-boot-spinner" aria-hidden="true"></div>
+      <p class="hw-boot-status" id="boot-status">Starting Hawaldar…</p>
+      <div class="hw-boot-tips">
+        <button type="button" class="hw-boot-nav" id="tip-prev" aria-label="Previous tip">
+          <span class="ms-icon">chevron_left</span>
+        </button>
+        <div class="hw-boot-viewport" aria-hidden="true">
+          <div class="hw-boot-track" id="tip-track">
+            <p class="hw-boot-tip">/full-engagement on an in-scope URL</p>
+            <p class="hw-boot-tip">Approve each PoC in-app</p>
+            <p class="hw-boot-tip">Findings are per chat + target</p>
+            <p class="hw-boot-tip">Reports are watermarked PDFs</p>
+            <p class="hw-boot-tip">Podman must be running</p>
+            <p class="hw-boot-tip">Loopback 127.0.0.1 is a real target</p>
+            <p class="hw-boot-tip">Type / anywhere for slash tools</p>
+            <p class="hw-boot-tip">Empty scope still allows a named or local target</p>
+          </div>
+        </div>
+        <button type="button" class="hw-boot-nav" id="tip-next" aria-label="Next tip">
+          <span class="ms-icon">chevron_right</span>
+        </button>
+      </div>
+      <div class="hw-boot-dots" id="tip-dots" aria-hidden="true"></div>
+      <p class="hw-boot-status hw-boot-live" id="tip-live" aria-live="polite"></p>
+    </div>
+    <script>
+      (function () {
+        var tips = document.querySelectorAll('.hw-boot-tip');
+        var track = document.getElementById('tip-track');
+        var dots = document.getElementById('tip-dots');
+        var live = document.getElementById('tip-live');
+        var statusEl = document.getElementById('boot-status');
+        var mark = document.getElementById('brand-mark');
+        var index = 0;
+        var count = tips.length;
+
+        function render() {
+          if (track) track.style.transform = 'translateX(' + (-index * 100) + '%)';
+          if (dots) {
+            var nodes = dots.querySelectorAll('.hw-boot-dot');
+            for (var i = 0; i < nodes.length; i++) {
+              nodes[i].classList.toggle('is-active', i === index);
+            }
+          }
+          if (live && tips[index]) {
+            live.textContent = 'Tip ' + (index + 1) + ' of ' + count + ': ' + (tips[index].textContent || '');
+          }
+        }
+
+        function go(dir) {
+          index = (index + dir + count) % count;
+          render();
+        }
+
+        for (var d = 0; d < count; d++) {
+          var dot = document.createElement('span');
+          dot.className = 'hw-boot-dot' + (d === 0 ? ' is-active' : '');
+          dots.appendChild(dot);
+        }
+
+        document.getElementById('tip-prev').addEventListener('click', function () { go(-1); });
+        document.getElementById('tip-next').addEventListener('click', function () { go(1); });
+        document.addEventListener('keydown', function (event) {
+          if (event.key === 'ArrowLeft') { event.preventDefault(); go(-1); }
+          if (event.key === 'ArrowRight') { event.preventDefault(); go(1); }
+        });
+
+        window.__hwSplashStatus = function (text) {
+          if (statusEl && text) statusEl.textContent = text;
+        };
+        window.__hwSplashHideMark = function () {
+          if (mark) mark.setAttribute('hidden', '');
+        };
+
+        var params = new URLSearchParams(location.search);
+        var theme = params.get('theme') === 'light' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', theme);
+        document.documentElement.style.colorScheme = theme;
+        var brand = params.get('brand');
+        var img = document.getElementById('brand-img');
+        if (brand && img) {
+          img.onload = function () {
+            img.removeAttribute('hidden');
+          };
+          img.onerror = function () {
+            img.setAttribute('hidden', '');
+            if (mark) mark.setAttribute('hidden', '');
+          };
+          img.src = brand;
+        } else if (mark) {
+          mark.setAttribute('hidden', '');
+        }
+
+        render();
+      })();
+    </script>
+  </body>
+</html>

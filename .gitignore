@@ -28,3 +28,5 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+# Versioned GitHub Pages copies generated at deploy time
+/docs/v*/

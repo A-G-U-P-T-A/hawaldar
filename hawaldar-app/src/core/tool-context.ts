@@ -8,6 +8,8 @@ export interface ProbeSnippet {
 	body?: string;
 	status?: number;
 	stdout: string;
+	payload?: string;
+	actions?: Array<{ op: string; selector?: string; value?: string; ms?: number }>;
 }
 
 export interface ToolExecContext {

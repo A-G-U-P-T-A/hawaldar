@@ -18,7 +18,12 @@ import {
 	GraphIcon,
 	FindingsIcon,
 	TasksIcon,
+	HomeIcon,
+	AddIcon,
+	RefreshIcon,
+	DeleteIcon,
 } from './navIcons';
+import { ThemeToggle } from './theme';
 import PaneSash from './PaneSash';
 import { clampGrow, MAIN_PANE_MIN, useDragResize, usePersistedPanelSize } from './paneResize';
 import { groupSessions, isSessionPinned, selectVisibleSessions, type SessionGroupId } from './sessionGroups';
@@ -88,6 +93,7 @@ interface Props {
 	onOpenView: (view: View) => void;
 	onSelectThread: (item: CatalogItem) => void;
 	onNewThread: () => void;
+	onHome: () => void;
 	onDeleteThread: (id: string) => void;
 	onRenameThread: (id: string, title: string) => void;
 	onPinThread: (id: string, pinned: boolean) => void;
@@ -98,6 +104,7 @@ interface Props {
 	graphActive?: boolean;
 	tasksActive?: boolean;
 	findingsActive?: boolean;
+	homeActive?: boolean;
 	/** Confirmed-findings badge on the rail icon; hidden when 0. */
 	findingsCount?: number;
 }
@@ -109,6 +116,7 @@ export default function Sidebar({
 	onOpenView,
 	onSelectThread,
 	onNewThread,
+	onHome,
 	onDeleteThread,
 	onRenameThread,
 	onPinThread,
@@ -119,6 +127,7 @@ export default function Sidebar({
 	graphActive = false,
 	tasksActive = false,
 	findingsActive = false,
+	homeActive = false,
 	findingsCount = 0,
 }: Props) {
 	const { t } = useI18n();
@@ -196,6 +205,15 @@ export default function Sidebar({
 		>
 			<div className="sessions-rail-inner">
 				<div className="sessions-title">
+					<button
+						type="button"
+						className={`icon-btn rail-home${homeActive ? ' on' : ''}`}
+						title={t('nav.home')}
+						aria-label={t('nav.home')}
+						onClick={onHome}
+					>
+						<HomeIcon filled={homeActive} />
+					</button>
 					<div className="sessions-brand">
 						<BrandMark size={20} className="sessions-mark" />
 						<h2 className="rail-label">{t('nav.sessions')}</h2>
@@ -208,18 +226,19 @@ export default function Sidebar({
 							aria-label={t('nav.newSession')}
 							onClick={onNewThread}
 						>
-							+
+							<AddIcon />
 						</button>
 						<button
 							type="button"
 							className="icon-btn"
 							title={t('nav.refresh')}
+							aria-label={t('nav.refresh')}
 							onClick={() => {
 								onRefreshThreads?.();
 								onOpenView('chat');
 							}}
 						>
-							↻
+							<RefreshIcon />
 						</button>
 					</div>
 				</div>
@@ -298,6 +317,7 @@ export default function Sidebar({
 						);
 					})}
 					<div className="rail-icon-row">
+						<ThemeToggle className="rail-icon-btn" />
 						<button
 							type="button"
 							className={`rail-icon-btn${graphActive ? ' active' : ''}`}
@@ -363,8 +383,8 @@ export default function Sidebar({
 			<button
 				type="button"
 				className="rail-groove"
-				title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-				aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+				title={collapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar')}
+				aria-label={collapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar')}
 				aria-expanded={!collapsed}
 				onPointerDown={(event) => {
 					if (!collapsed) {
@@ -401,6 +421,7 @@ function SessionRow({
 	onRename: (title: string) => void;
 	onPin: () => void;
 }) {
+	const { t } = useI18n();
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(item.label);
 	const inputRef = useRef<HTMLInputElement>(null);
@@ -448,8 +469,8 @@ function SessionRow({
 	return (
 		<div className={`session-row${active ? ' active' : ''}${pinned ? ' pinned' : ''}`}>
 			{pinned && (
-				<span className="session-pin-glyph" title="Pinned" aria-hidden="true">
-					<PinIcon filled size={12} />
+				<span className="session-pin-glyph" title={t('chrome.pinned')} aria-hidden="true">
+					<PinIcon filled size={16} />
 				</span>
 			)}
 			{editing ? (
@@ -473,8 +494,8 @@ function SessionRow({
 				<button
 					type="button"
 					className={`icon-btn${pinned ? ' on' : ''}`}
-					title={pinned ? 'Unpin' : 'Pin'}
-					aria-label={pinned ? 'Unpin' : 'Pin'}
+					title={pinned ? t('chrome.unpin') : t('chrome.pin')}
+					aria-label={pinned ? t('chrome.unpin') : t('chrome.pin')}
 					onClick={(e) => {
 						e.stopPropagation();
 						onPin();
@@ -485,8 +506,8 @@ function SessionRow({
 				<button
 					type="button"
 					className="icon-btn"
-					title="Rename"
-					aria-label="Rename"
+					title={t('chrome.rename')}
+					aria-label={t('chrome.rename')}
 					onClick={(e) => {
 						e.stopPropagation();
 						setDraft(item.label);
@@ -498,14 +519,14 @@ function SessionRow({
 				<button
 					type="button"
 					className="icon-btn"
-					title="Delete"
-					aria-label="Delete"
+					title={t('chrome.delete')}
+					aria-label={t('chrome.delete')}
 					onClick={(e) => {
 						e.stopPropagation();
 						onDelete();
 					}}
 				>
-					×
+					<DeleteIcon />
 				</button>
 			</span>
 		</div>

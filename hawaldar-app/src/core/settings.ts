@@ -40,6 +40,8 @@ export interface HawaldarSettings {
 	legalAcceptedAt: number | null;
 	/** UI locale (chrome only). Legal LICENSE text stays English. */
 	locale: string;
+	/** Persisted chrome theme. Default dark. */
+	theme: 'dark' | 'light';
 	extensionPath: string;
 	cacheDir: string;
 }
@@ -61,6 +63,7 @@ export interface SettingsPatch {
 	thinking?: boolean;
 	sessionTtlDays?: number;
 	locale?: string;
+	theme?: 'dark' | 'light';
 }
 
 interface PersistedSettings {
@@ -86,6 +89,7 @@ interface PersistedSettings {
 	legalVersion?: string;
 	legalAcceptedAt?: number;
 	locale?: string;
+	theme?: 'dark' | 'light';
 }
 
 export class SettingsStore {
@@ -127,6 +131,7 @@ export class SettingsStore {
 			legalVersion: raw.legalVersion || '',
 			legalAcceptedAt: raw.legalAcceptedAt || null,
 			locale: normalizeLocale(raw.locale),
+			theme: normalizeTheme(raw.theme),
 			extensionPath: this.extensionPath,
 			cacheDir: this.cacheDir,
 		};
@@ -181,6 +186,7 @@ export class SettingsStore {
 			legalVersion: current.legalVersion,
 			legalAcceptedAt: current.legalAcceptedAt,
 			locale: patch.locale !== undefined ? normalizeLocale(patch.locale) : normalizeLocale(current.locale),
+			theme: patch.theme !== undefined ? normalizeTheme(patch.theme) : normalizeTheme(current.theme),
 			apiKeyEnc: current.apiKeyEnc,
 		};
 		if (patch.apiKey !== undefined && patch.apiKey !== '') {
@@ -313,6 +319,7 @@ export class SettingsStore {
 				legalVersion: typeof parsed.legalVersion === 'string' ? parsed.legalVersion.trim() : '',
 				legalAcceptedAt: Number(parsed.legalAcceptedAt) || undefined,
 				locale: normalizeLocale(parsed.locale),
+				theme: normalizeTheme(parsed.theme),
 			};
 			if (enabled.changed || !sameToolImages(parsed.toolImages, toolImages)) {
 				this.writeJsonFile(next);
@@ -414,6 +421,7 @@ function defaultPersisted(): PersistedSettings {
 		legalVersion: '',
 		legalAcceptedAt: undefined,
 		locale: 'en',
+		theme: 'dark',
 	};
 }
 
@@ -422,6 +430,10 @@ const UI_LOCALES = ['en', 'es', 'hi', 'de', 'ja'] as const;
 export function normalizeLocale(value: unknown): string {
 	const next = typeof value === 'string' ? value.trim() : '';
 	return (UI_LOCALES as readonly string[]).includes(next) ? next : 'en';
+}
+
+export function normalizeTheme(value: unknown): 'dark' | 'light' {
+	return value === 'light' ? 'light' : 'dark';
 }
 
 function sameToolImages(stored: Record<string, string> | undefined, hydrated: Record<string, string>): boolean {

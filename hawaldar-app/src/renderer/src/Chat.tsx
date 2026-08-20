@@ -5,6 +5,7 @@ import BrandMark from './BrandMark';
 import Dropdown from './Dropdown';
 import MarkdownBody from './MarkdownBody';
 import { toDisplayText, appendStreamDelta } from './displayText';
+import { SendIcon } from './navIcons';
 import { modelSearchToolbar } from './ThinkToggle';
 import {
 	addressesFromActivity,
@@ -1097,9 +1098,7 @@ export default function Chat({
 							title={t('chat.send')}
 							onClick={() => sendComposer()}
 						>
-							<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-								<path d="M8 3.5 3.5 8H7v4.5h2V8h3.5L8 3.5z" />
-							</svg>
+							<SendIcon size={16} filled />
 						</button>
 					</div>
 				</div>

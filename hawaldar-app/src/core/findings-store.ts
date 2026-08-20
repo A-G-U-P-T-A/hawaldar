@@ -14,7 +14,14 @@ export type FindingClass =
 
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
-export type FindingStatus = 'hypothesis' | 'validating' | 'confirmed' | 'unconfirmed' | 'not-exploitable';
+export type FindingStatus =
+	| 'hypothesis'
+	| 'validating'
+	| 'confirmed'
+	| 'unconfirmed'
+	| 'not-exploitable'
+	| 'informed'
+	| 'fixed';
 
 export interface FindingRequest {
 	method?: string;
@@ -23,6 +30,8 @@ export interface FindingRequest {
 	status?: number;
 	response?: string;
 	tool?: string;
+	payload?: string;
+	actions?: Array<{ op: string; selector?: string; value?: string; ms?: number }>;
 }
 
 export interface FindingRecord {
@@ -45,6 +54,10 @@ export interface FindingRecord {
 	/** Agent id that recorded or last updated the finding. */
 	source: string;
 	sessionId: string;
+	runId: string;
+	/** Last PDF export that included this finding. */
+	reportId: string;
+	informedAt: number;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -65,18 +78,32 @@ export interface FindingWrite {
 	references?: string[];
 	source?: string;
 	sessionId?: string;
+	runId?: string;
+	reportId?: string;
+	informedAt?: number;
 }
 
 export interface FindingFilter {
 	status?: FindingStatus;
 	vulnClass?: FindingClass;
 	query?: string;
+	sessionId?: string;
+	runId?: string;
+	/** When listing a chat, also include findings recorded before sessionId was wired. */
+	includeUnassigned?: boolean;
+	/** Website URL, host, or IP:port — uses targetsMatch. */
+	target?: string;
 	limit?: number;
 }
 
 export const FINDING_CLASSES: FindingClass[] = ['injection', 'xss', 'ssrf', 'auth', 'csrf', 'ssti', 'idor', 'version', 'other'];
 export const FINDING_SEVERITIES: FindingSeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
-export const FINDING_STATUSES: FindingStatus[] = ['hypothesis', 'validating', 'confirmed', 'unconfirmed', 'not-exploitable'];
+export const FINDING_STATUSES: FindingStatus[] = [
+	'hypothesis', 'validating', 'confirmed', 'unconfirmed', 'not-exploitable', 'informed', 'fixed',
+];
+
+const FINDING_SELECT = `id, title, class, severity, status, target, description, steps, evidence, request,
+	impact, remediation, refs, source, session_id, run_id, report_id, informed_at, created_at, updated_at`;
 
 const ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const CAPS = {
@@ -137,6 +164,54 @@ export function normalizeFindingStatus(value: unknown): FindingStatus {
 	return (FINDING_STATUSES as string[]).includes(raw) ? raw as FindingStatus : 'hypothesis';
 }
 
+/**
+ * Match a stored finding target against a filter typed as a URL, host, or IP:port.
+ * `http://127.0.0.1:3000` and `127.0.0.1:3000` are the same surface.
+ */
+export function targetsMatch(left: string, right: string): boolean {
+	const a = String(left ?? '').trim();
+	const b = String(right ?? '').trim();
+	if (!a || !b) {
+		return a.toLowerCase() === b.toLowerCase();
+	}
+	if (a.toLowerCase() === b.toLowerCase()) {
+		return true;
+	}
+	const na = normalizeTarget(a);
+	const nb = normalizeTarget(b);
+	if (!na.host || !nb.host) {
+		const al = a.toLowerCase();
+		const bl = b.toLowerCase();
+		return al.includes(bl) || bl.includes(al);
+	}
+	if (na.host !== nb.host) {
+		return false;
+	}
+	if (na.port && nb.port && na.port !== nb.port) {
+		return false;
+	}
+	return true;
+}
+
+function normalizeTarget(raw: string): { host: string; port: string } {
+	const trimmed = raw.trim();
+	try {
+		const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `http://${trimmed}`;
+		const url = new URL(withScheme);
+		const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+		return { host, port: url.port };
+	} catch {
+		const hostPort = /^(\[?[A-Za-z0-9._:-]+\]?)(?::(\d{1,5}))?$/.exec(trimmed);
+		if (!hostPort) {
+			return { host: '', port: '' };
+		}
+		return {
+			host: hostPort[1].replace(/^\[|\]$/g, '').toLowerCase(),
+			port: hostPort[2] || '',
+		};
+	}
+}
+
 export class FindingsStore {
 	readonly databasePath: string;
 	readonly ready: Promise<void>;
@@ -164,8 +239,7 @@ export class FindingsStore {
 	async list(filter: FindingFilter = {}): Promise<FindingRecord[]> {
 		await this.ready;
 		const rs = await this.client.execute(`
-			SELECT id, title, class, severity, status, target, description, steps, evidence, request,
-				impact, remediation, refs, source, session_id, created_at, updated_at
+			SELECT ${FINDING_SELECT}
 			FROM findings
 			ORDER BY updated_at DESC
 		`);
@@ -176,12 +250,29 @@ export class FindingsStore {
 		if (filter.vulnClass) {
 			rows = rows.filter((row) => row.vulnClass === filter.vulnClass);
 		}
+		if (filter.sessionId !== undefined) {
+			rows = rows.filter((row) => {
+				if (row.sessionId === filter.sessionId) {
+					return true;
+				}
+				return Boolean(filter.includeUnassigned) && !row.sessionId.trim();
+			});
+		}
+		if (filter.runId !== undefined && filter.runId !== '') {
+			rows = rows.filter((row) => row.runId === filter.runId);
+		}
+		if (filter.target?.trim()) {
+			const want = filter.target.trim();
+			rows = rows.filter((row) => targetsMatch(row.target, want));
+		}
 		if (filter.query?.trim()) {
 			const q = filter.query.trim().toLowerCase();
 			rows = rows.filter((row) => (
 				row.title.toLowerCase().includes(q)
 				|| row.target.toLowerCase().includes(q)
 				|| row.description.toLowerCase().includes(q)
+				|| row.sessionId.toLowerCase().includes(q)
+				|| row.reportId.toLowerCase().includes(q)
 			));
 		}
 		const limit = Math.max(1, Math.min(filter.limit ?? 500, 1_000));
@@ -194,8 +285,7 @@ export class FindingsStore {
 			return undefined;
 		}
 		const rs = await this.client.execute({
-			sql: `SELECT id, title, class, severity, status, target, description, steps, evidence, request,
-					impact, remediation, refs, source, session_id, created_at, updated_at
+			sql: `SELECT ${FINDING_SELECT}
 				FROM findings WHERE id = ?`,
 			args: [id],
 		});
@@ -204,8 +294,8 @@ export class FindingsStore {
 	}
 
 	/**
-	 * Insert or update a finding. Without `id`, a natural key (class + title + target)
-	 * dedupes re-runs of the same engagement. `confirmed` requires repro steps and evidence —
+	 * Insert or update a finding. Without `id`, a natural key (class + title + target + sessionId)
+	 * dedupes re-runs of the same chat. `confirmed` requires repro steps and evidence —
 	 * the store is the enforcement point for "no invented PoCs".
 	 */
 	async upsert(draft: FindingWrite): Promise<FindingRecord> {
@@ -233,6 +323,12 @@ export class FindingsStore {
 		if (status === 'not-exploitable' && !evidence && !existing?.evidence) {
 			throw new Error('A not-exploitable finding needs evidence of the failed proof attempt.');
 		}
+		if (status === 'fixed' && !evidence && !existing?.evidence) {
+			throw new Error('A fixed finding needs retest evidence that the stored PoC no longer reproduces.');
+		}
+		const informedAt = draft.informedAt !== undefined
+			? Number(draft.informedAt) || 0
+			: (status === 'informed' && !existing?.informedAt ? Date.now() : (existing?.informedAt ?? 0));
 		const now = Date.now();
 		const id = existing?.id || uniqueSlug(slugifyName(title, 'finding'), await this.ids());
 		if (!ID_RE.test(id)) {
@@ -254,24 +350,29 @@ export class FindingsStore {
 			references: draft.references !== undefined ? cleanReferences(draft.references) : (existing?.references ?? []),
 			source: cleanText(draft.source ?? existing?.source, 80),
 			sessionId: String(draft.sessionId ?? existing?.sessionId ?? ''),
+			runId: String(draft.runId ?? existing?.runId ?? ''),
+			reportId: String(draft.reportId ?? existing?.reportId ?? ''),
+			informedAt,
 			createdAt: existing?.createdAt ?? now,
 			updatedAt: now,
 		};
 		await this.client.execute({
 			sql: `INSERT INTO findings (id, title, class, severity, status, target, description, steps, evidence,
-					request, impact, remediation, refs, source, session_id, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					request, impact, remediation, refs, source, session_id, run_id, report_id, informed_at,
+					created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET title = excluded.title, class = excluded.class,
 					severity = excluded.severity, status = excluded.status, target = excluded.target,
 					description = excluded.description, steps = excluded.steps, evidence = excluded.evidence,
 					request = excluded.request, impact = excluded.impact, remediation = excluded.remediation,
 					refs = excluded.refs, source = excluded.source, session_id = excluded.session_id,
+					run_id = excluded.run_id, report_id = excluded.report_id, informed_at = excluded.informed_at,
 					updated_at = excluded.updated_at`,
 			args: [
 				record.id, record.title, record.vulnClass, record.severity, record.status, record.target,
 				record.description, JSON.stringify(record.steps), record.evidence, JSON.stringify(record.request),
 				record.impact, record.remediation, JSON.stringify(record.references), record.source, record.sessionId,
-				record.createdAt, record.updatedAt,
+				record.runId, record.reportId, record.informedAt, record.createdAt, record.updatedAt,
 			],
 		});
 		this.notify();
@@ -306,6 +407,27 @@ export class FindingsStore {
 		return { total: rows.length, confirmed: byStatus.confirmed ?? 0, bySeverity, byStatus };
 	}
 
+	async markReportIds(ids: string[], reportId: string): Promise<void> {
+		await this.ready;
+		const stamp = String(reportId || '').trim();
+		if (!stamp) {
+			return;
+		}
+		const now = Date.now();
+		for (const id of ids) {
+			if (!ID_RE.test(id)) {
+				continue;
+			}
+			await this.client.execute({
+				sql: 'UPDATE findings SET report_id = ?, updated_at = ? WHERE id = ?',
+				args: [stamp, now, id],
+			});
+		}
+		if (ids.length > 0) {
+			this.notify();
+		}
+	}
+
 	private async findByNaturalKey(draft: FindingWrite): Promise<FindingRecord | undefined> {
 		const title = cleanText(draft.title, CAPS.title);
 		if (!title) {
@@ -313,9 +435,10 @@ export class FindingsStore {
 		}
 		const vulnClass = normalizeFindingClass(draft.vulnClass);
 		const target = cleanText(draft.target, CAPS.target);
+		const sessionId = String(draft.sessionId ?? '');
 		const rs = await this.client.execute({
-			sql: 'SELECT id FROM findings WHERE class = ? AND target = ? AND lower(title) = lower(?)',
-			args: [vulnClass, target, title],
+			sql: 'SELECT id FROM findings WHERE class = ? AND target = ? AND lower(title) = lower(?) AND session_id = ?',
+			args: [vulnClass, target, title, sessionId],
 		});
 		const row = rs.rows[0];
 		return row ? this.get(String(row.id)) : undefined;
@@ -354,6 +477,35 @@ export class FindingsStore {
 		} catch {
 			/* column already exists */
 		}
+		try {
+			await this.client.execute("ALTER TABLE findings ADD COLUMN run_id TEXT NOT NULL DEFAULT ''");
+		} catch {
+			/* column already exists */
+		}
+		try {
+			await this.client.execute("ALTER TABLE findings ADD COLUMN report_id TEXT NOT NULL DEFAULT ''");
+		} catch {
+			/* column already exists */
+		}
+		try {
+			await this.client.execute("ALTER TABLE findings ADD COLUMN informed_at INTEGER NOT NULL DEFAULT 0");
+		} catch {
+			/* column already exists */
+		}
+		await this.client.execute(`
+			CREATE TABLE IF NOT EXISTS reports (
+				id TEXT PRIMARY KEY,
+				title TEXT NOT NULL,
+				target TEXT NOT NULL DEFAULT '',
+				session_id TEXT NOT NULL DEFAULT '',
+				chat_title TEXT NOT NULL DEFAULT '',
+				run_id TEXT NOT NULL DEFAULT '',
+				file_path TEXT NOT NULL DEFAULT '',
+				finding_ids TEXT NOT NULL DEFAULT '[]',
+				query TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL
+			)
+		`);
 	}
 }
 
@@ -374,6 +526,9 @@ function mapFinding(row: Row): FindingRecord {
 		references: parseJsonList(row.refs),
 		source: String(row.source ?? ''),
 		sessionId: String(row.session_id ?? ''),
+		runId: String(row.run_id ?? ''),
+		reportId: String(row.report_id ?? ''),
+		informedAt: Number(row.informed_at) || 0,
 		createdAt: Number(row.created_at) || 0,
 		updatedAt: Number(row.updated_at) || 0,
 	};
@@ -420,6 +575,21 @@ function cleanRequest(value: unknown): FindingRequest {
 	}
 	if (typeof rec.tool === 'string' && rec.tool.trim()) {
 		out.tool = rec.tool.trim().slice(0, 80);
+	}
+	if (typeof rec.payload === 'string' && rec.payload.trim()) {
+		out.payload = rec.payload.trim().slice(0, 2_000);
+	}
+	if (Array.isArray(rec.actions)) {
+		out.actions = rec.actions
+			.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+			.slice(0, 10)
+			.map((item) => ({
+				op: String(item.op ?? '').trim().slice(0, 32),
+				selector: typeof item.selector === 'string' ? item.selector.trim().slice(0, 200) : undefined,
+				value: typeof item.value === 'string' ? item.value.trim().slice(0, 500) : undefined,
+				ms: typeof item.ms === 'number' && Number.isFinite(item.ms) ? item.ms : undefined,
+			}))
+			.filter((item) => item.op);
 	}
 	return out;
 }

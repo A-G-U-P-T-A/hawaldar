@@ -15,7 +15,9 @@ import { modelSearchToolbar } from './ThinkToggle';
 import { TOOL_CATALOG, EXCLUDED_MCP_TOOLS } from './toolMeta';
 import WorkflowsSettings from './WorkflowsSettings';
 import { findListedModel, isListedFree, modelPickerOption } from './modelDisplay';
+import Icon, { type IconName } from './Icon';
 import { LanguagePicker, useI18n } from './i18n';
+import { ThemePicker } from './theme';
 
 export type SettingsCategory = 'provider' | 'scope' | 'runtime' | 'tools' | 'workflows' | 'rules' | 'notes' | 'tasks' | 'prompts' | 'readiness' | 'legal';
 
@@ -27,18 +29,18 @@ interface Props {
 }
 type ToolsSub = 'builtin' | 'custom';
 
-const CATEGORIES: Array<{ id: SettingsCategory; labelKey: string }> = [
-	{ id: 'provider', labelKey: 'settings.category.provider' },
-	{ id: 'scope', labelKey: 'settings.category.scope' },
-	{ id: 'runtime', labelKey: 'settings.category.runtime' },
-	{ id: 'tools', labelKey: 'settings.category.tools' },
-	{ id: 'prompts', labelKey: 'settings.category.prompts' },
-	{ id: 'readiness', labelKey: 'settings.category.readiness' },
-	{ id: 'workflows', labelKey: 'settings.category.workflows' },
-	{ id: 'rules', labelKey: 'settings.category.rules' },
-	{ id: 'notes', labelKey: 'settings.category.notes' },
-	{ id: 'tasks', labelKey: 'settings.category.tasks' },
-	{ id: 'legal', labelKey: 'settings.category.legal' },
+const CATEGORIES: Array<{ id: SettingsCategory; labelKey: string; icon: IconName }> = [
+	{ id: 'provider', labelKey: 'settings.category.provider', icon: 'vpn_key' },
+	{ id: 'scope', labelKey: 'settings.category.scope', icon: 'public' },
+	{ id: 'runtime', labelKey: 'settings.category.runtime', icon: 'deployed_code' },
+	{ id: 'tools', labelKey: 'settings.category.tools', icon: 'build' },
+	{ id: 'prompts', labelKey: 'settings.category.prompts', icon: 'edit_note' },
+	{ id: 'readiness', labelKey: 'settings.category.readiness', icon: 'checklist' },
+	{ id: 'workflows', labelKey: 'settings.category.workflows', icon: 'account_tree' },
+	{ id: 'rules', labelKey: 'settings.category.rules', icon: 'gavel' },
+	{ id: 'notes', labelKey: 'settings.category.notes', icon: 'note_stack' },
+	{ id: 'tasks', labelKey: 'settings.category.tasks', icon: 'task_alt' },
+	{ id: 'legal', labelKey: 'settings.category.legal', icon: 'policy' },
 ];
 
 function groupReadiness(items: ReadinessCheckDTO[]) {
@@ -417,6 +419,7 @@ export default function Settings({ onSaved, onClose, initialCategory = 'provider
 					className={`settings-nav-item${category === item.id ? ' active' : ''}`}
 					onClick={() => selectCategory(item.id)}
 				>
+					<Icon name={item.icon} />
 					{t(item.labelKey)}
 				</button>
 			))}
@@ -447,6 +450,7 @@ export default function Settings({ onSaved, onClose, initialCategory = 'provider
 				<div className="settings-main-head">
 					<h1 className="settings-main-title">{t('settings.title')}</h1>
 					<div className="settings-head-actions">
+						<ThemePicker id="settings-theme-loading" />
 						<LanguagePicker id="settings-locale-loading" />
 						<button type="button" className="btn" onClick={onClose}>{t('settings.backToChat')}</button>
 					</div>
@@ -1306,6 +1310,7 @@ export default function Settings({ onSaved, onClose, initialCategory = 'provider
 						)}
 					</div>
 					<div className="settings-head-actions">
+						<ThemePicker id="settings-theme" />
 						<LanguagePicker id="settings-locale" />
 						<button type="button" className="btn" onClick={onClose}>{t('settings.backToChat')}</button>
 					</div>

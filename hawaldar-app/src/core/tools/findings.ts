@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { uniqueSlug, slugifyName } from '../data-home';
+import { buildEngagementPdfDocument, formatPdfChatTitle, renderPdfLite, type PdfFindingInput } from '../pdf-lite';
 import {
 	FINDING_CLASSES,
 	FINDING_SEVERITIES,
@@ -11,6 +13,7 @@ import {
 	normalizeFindingSeverity,
 	normalizeFindingStatus,
 } from '../findings-store';
+import type { ReportsStore } from '../reports-store';
 import { ensureWorkspace, WORKSPACE_DISPLAY_PATH, workspaceHostPath } from '../sandbox/workspace';
 import { restoreTargetPlaceholders } from '../policy';
 import { currentToolContext, lastMatchingProbe } from '../tool-context';
@@ -33,7 +36,7 @@ export function isFindingTool(id: string): boolean {
 export function buildFindingInputSchema(z: any, id: string) {
 	if (id === 'finding-record') {
 		return z.object({
-			id: z.string().optional().describe('Existing finding id to update. Omit to create (class+title+target dedupes re-runs).'),
+			id: z.string().optional().describe('Existing finding id to update. Omit to create (class+title+target+session dedupes re-runs).'),
 			title: z.string().describe('Short finding title, e.g. "Authentication bypass via direct dashboard access".'),
 			class: z.string().optional().describe('Alias for vulnClass. Prefer vulnClass.'),
 			vulnClass: z.enum(FINDING_CLASSES as [string, ...string[]]).optional()
@@ -41,7 +44,7 @@ export function buildFindingInputSchema(z: any, id: string) {
 			severity: z.enum(FINDING_SEVERITIES as [string, ...string[]]).optional()
 				.describe('critical | high | medium | low | info. Do not inflate.'),
 			status: z.enum(FINDING_STATUSES as [string, ...string[]]).optional()
-				.describe('hypothesis → validating → confirmed | unconfirmed | not-exploitable. confirmed requires steps + evidence.'),
+				.describe('hypothesis → validating → confirmed | unconfirmed | not-exploitable | informed | fixed. confirmed requires steps + evidence.'),
 			target: z.string().optional().describe('Host or URL the finding applies to.'),
 			description: z.string().optional(),
 			steps: z.union([z.array(z.string()), z.string(), z.number()]).optional()
@@ -61,12 +64,17 @@ export function buildFindingInputSchema(z: any, id: string) {
 			status: z.enum(FINDING_STATUSES as [string, ...string[]]).optional(),
 			vulnClass: z.enum(FINDING_CLASSES as [string, ...string[]]).optional(),
 			query: z.string().optional(),
+			sessionId: z.string().optional(),
+			runId: z.string().optional(),
+			target: z.string().optional().describe('Website URL, host, or IP:port'),
 			limit: z.number().optional(),
 		});
 	}
 	return z.object({
 		title: z.string().optional().describe('Report title. Default: Engagement report.'),
 		target: z.string().optional().describe('Engagement target shown in the report header.'),
+		sessionId: z.string().optional(),
+		runId: z.string().optional(),
 	});
 }
 
@@ -74,7 +82,13 @@ export async function runFindingTool(
 	store: FindingsStore,
 	id: string,
 	input: Record<string, unknown>,
-	extra?: { sessionId?: string; source?: string },
+	extra?: {
+		sessionId?: string;
+		runId?: string;
+		source?: string;
+		reports?: ReportsStore;
+		chatTitle?: string;
+	},
 ) {
 	try {
 		if (id === 'finding-record') {
@@ -110,6 +124,7 @@ export async function runFindingTool(
 				references: Array.isArray(input.references) ? input.references.map((item) => restore(String(item))) : undefined,
 				source: extra?.source,
 				sessionId: extra?.sessionId,
+				runId: extra?.runId,
 			});
 			return ok({
 				saved: true,
@@ -126,6 +141,9 @@ export async function runFindingTool(
 				status: input.status !== undefined ? normalizeFindingStatus(input.status) : undefined,
 				vulnClass: input.vulnClass !== undefined ? normalizeFindingClass(input.vulnClass) : undefined,
 				query: typeof input.query === 'string' ? input.query : undefined,
+				sessionId: typeof input.sessionId === 'string' ? input.sessionId : undefined,
+				runId: typeof input.runId === 'string' ? input.runId : undefined,
+				target: typeof input.target === 'string' ? input.target : undefined,
 				limit: typeof input.limit === 'number' ? input.limit : undefined,
 			});
 			const counts = await store.counts();
@@ -141,6 +159,9 @@ export async function runFindingTool(
 					severity: row.severity,
 					status: row.status,
 					target: row.target,
+					sessionId: row.sessionId,
+					runId: row.runId,
+					reportId: row.reportId,
 					stepCount: row.steps.length,
 					hasEvidence: Boolean(row.evidence),
 					updatedAt: row.updatedAt,
@@ -154,9 +175,29 @@ export async function runFindingTool(
 				implied,
 			);
 			const title = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : 'Engagement report';
-			const findings = await store.list();
-			const markdown = renderFindingsReport(findings, { title, target });
-			const saved = saveReportArtifact(markdown, target, implied);
+			const sessionId = typeof input.sessionId === 'string' && input.sessionId.trim()
+				? input.sessionId.trim()
+				: extra?.sessionId;
+			const runId = typeof input.runId === 'string' && input.runId.trim()
+				? input.runId.trim()
+				: extra?.runId;
+			const findings = await store.list({
+				sessionId,
+				runId: typeof input.runId === 'string' ? input.runId : undefined,
+				target: target || undefined,
+			});
+			const saved = await persistFindingsPdf({
+				store,
+				reports: extra?.reports,
+				findings,
+				title,
+				target,
+				sessionId: sessionId || '',
+				chatTitle: extra?.chatTitle || '',
+				runId: runId || '',
+				query: target,
+				implied,
+			});
 			const table = formatFindingsChatTable(findings);
 			return ok({ ...saved, findings: findings.length, table });
 		}
@@ -172,7 +213,8 @@ export function renderFindingsReport(
 	findings: FindingRecord[],
 	meta: { title: string; target: string },
 ): string {
-	const confirmed = findings.filter((row) => row.status === 'confirmed');
+	const confirmed = findings.filter((row) => row.status === 'confirmed' || row.status === 'informed');
+	const fixed = findings.filter((row) => row.status === 'fixed');
 	const notExploitable = findings.filter((row) => row.status === 'not-exploitable');
 	const open = findings.filter((row) => row.status === 'hypothesis' || row.status === 'validating' || row.status === 'unconfirmed');
 	const bySeverity = new Map<string, number>();
@@ -189,7 +231,8 @@ export function renderFindingsReport(
 		'',
 		'## Summary',
 		'',
-		`- Confirmed vulnerabilities: **${confirmed.length}**`,
+		`- Confirmed / informed: **${confirmed.length}**`,
+		fixed.length ? `- Fixed (retest no longer reproduces): ${fixed.length}` : '',
 		`- Not exploitable (attempted, evidence attached): ${notExploitable.length}`,
 		`- Open hypotheses / unconfirmed: ${open.length}`,
 	];
@@ -211,6 +254,12 @@ export function renderFindingsReport(
 			lines.push(...renderFinding(row, index + 1));
 		});
 	}
+	if (fixed.length > 0) {
+		lines.push('', '## Fixed (retest)', '');
+		for (const row of fixed) {
+			lines.push(`- **${row.title}** (${row.vulnClass}${row.target ? `, ${row.target}` : ''}) — ${summarize(row.evidence)}`);
+		}
+	}
 	if (notExploitable.length > 0) {
 		lines.push('', '## Attempted, not exploitable', '');
 		for (const row of notExploitable) {
@@ -228,7 +277,7 @@ export function renderFindingsReport(
 		'## Notes',
 		'',
 		'- Every confirmed finding above ships reproduction steps and the tool evidence collected during the run.',
-		'- Re-test after remediation: re-run the matching playbook and confirm the finding flips to not-exploitable.',
+		'- Re-test after remediation: replay the stored poc-request / poc-act / poc-xss-canary / sqlmap-scan (HITL). If it no longer proves the issue, mark the finding fixed.',
 		'',
 	);
 	return lines.join('\n');
@@ -240,6 +289,8 @@ function renderFinding(row: FindingRecord, index: number): string[] {
 		'',
 		`- Class: ${row.vulnClass}`,
 		row.target ? `- Affected: ${row.target}` : '',
+		row.sessionId ? `- Chat: ${row.sessionId}` : '',
+		row.reportId ? `- Report: ${row.reportId}` : '',
 		row.description ? `\n${row.description}` : '',
 		'',
 		'**Reproduction (PoC):**',
@@ -273,8 +324,61 @@ function summarize(text: string): string {
 	return flat.length > 180 ? `${flat.slice(0, 180)}…` : flat || 'no notes';
 }
 
-export function saveReportArtifact(
-	markdown: string,
+export async function persistFindingsPdf(opts: {
+	store: FindingsStore;
+	reports?: ReportsStore;
+	findings: FindingRecord[];
+	title: string;
+	target: string;
+	sessionId: string;
+	chatTitle: string;
+	runId: string;
+	query?: string;
+	implied?: readonly string[];
+}): Promise<{ id: string; title: string; path: string; displayPath: string; findings: number }> {
+	const implied = opts.implied ?? [];
+	const reportId = uniqueReportId(opts.title);
+	const chatTitle = formatPdfChatTitle(opts.chatTitle, opts.sessionId);
+	const target = restoreTargetPlaceholders(opts.target || '', implied);
+	const document = buildEngagementPdfDocument(
+		opts.findings.map((row) => toPdfFinding(row, implied)),
+		{
+			title: opts.title,
+			chatTitle,
+			sessionId: opts.sessionId,
+			reportId,
+			target,
+			runId: opts.runId,
+			generatedAt: new Date(),
+		},
+	);
+	const bytes = renderPdfLite({
+		title: opts.title,
+		subject: 'Authorized engagement report',
+		watermark: 'HAWALDAR',
+		footer: 'Generated by Hawaldar. Not for unaffiliated redistribution as original work.',
+		document,
+	});
+	const saved = saveReportPdf(bytes, target, implied);
+	if (opts.reports) {
+		await opts.reports.insert({
+			id: reportId,
+			title: opts.title,
+			target: target,
+			sessionId: opts.sessionId,
+			chatTitle,
+			runId: opts.runId,
+			filePath: saved.path,
+			findingIds: opts.findings.map((row) => row.id),
+			query: opts.query || opts.target,
+		});
+	}
+	await opts.store.markReportIds(opts.findings.map((row) => row.id), reportId);
+	return { id: reportId, title: opts.title, ...saved, findings: opts.findings.length };
+}
+
+export function saveReportPdf(
+	bytes: Uint8Array,
 	target: string,
 	implied: readonly string[] = [],
 ): { path: string; displayPath: string } {
@@ -283,11 +387,56 @@ export function saveReportArtifact(
 	fs.mkdirSync(dir, { recursive: true });
 	const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 	const slug = reportFileSlug(target, implied);
-	const filePath = path.join(dir, `${stamp}-${slug}.md`);
-	fs.writeFileSync(filePath, markdown, 'utf8');
+	const filePath = path.join(dir, `${stamp}-${slug}.pdf`);
+	fs.writeFileSync(filePath, Buffer.from(bytes));
 	return {
 		path: filePath,
 		displayPath: `${WORKSPACE_DISPLAY_PATH}/reports/${path.basename(filePath)}`,
+	};
+}
+
+/** @deprecated PDF is the operator deliverable; kept for tests that still import the name. */
+export function saveReportArtifact(
+	markdown: string,
+	target: string,
+	implied: readonly string[] = [],
+): { path: string; displayPath: string } {
+	const bytes = renderPdfLite({
+		title: 'Engagement report',
+		watermark: 'HAWALDAR',
+		footer: 'Generated by Hawaldar. Not for unaffiliated redistribution as original work.',
+		body: markdown,
+	});
+	return saveReportPdf(bytes, target, implied);
+}
+
+function uniqueReportId(_title: string): string {
+	const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+	return uniqueSlug(slugifyName(`rpt-${stamp}`, 'rpt'), []);
+}
+
+function toPdfFinding(row: FindingRecord, implied: readonly string[]): PdfFindingInput {
+	const restore = (value: string) => restoreTargetPlaceholders(value, implied);
+	return {
+		title: restore(row.title),
+		severity: row.severity,
+		vulnClass: row.vulnClass,
+		status: row.status,
+		target: restore(row.target || ''),
+		description: restore(row.description || ''),
+		steps: row.steps.map((step) => restore(step)),
+		evidence: restore(row.evidence || ''),
+		request: row.request
+			? {
+				...row.request,
+				url: row.request.url ? restore(row.request.url) : row.request.url,
+				body: row.request.body ? restore(row.request.body) : row.request.body,
+				response: row.request.response ? restore(row.request.response) : row.request.response,
+			}
+			: undefined,
+		impact: restore(row.impact || ''),
+		remediation: restore(row.remediation || ''),
+		references: row.references.map((item) => restore(item)),
 	};
 }
 
@@ -323,6 +472,12 @@ function gateConfirmedFinding(opts: {
 		if (!request.tool) {
 			request.tool = probe.tool;
 		}
+		if (!request.payload && probe.payload) {
+			request.payload = probe.payload;
+		}
+		if (!request.actions && probe.actions) {
+			request.actions = probe.actions;
+		}
 		if (steps.length === 0 && probe.method && probe.url) {
 			steps = [`${probe.method} ${probe.url}`];
 		}
@@ -345,10 +500,14 @@ function requestFromInput(input: Record<string, unknown>, restore: (value: strin
 	const body = typeof input.body === 'string'
 		? restore(input.body)
 		: (input.body && typeof input.body === 'object' ? JSON.stringify(input.body) : undefined);
-	if (!method && !url && !body) {
+	const payload = typeof input.payload === 'string' ? restore(input.payload) : undefined;
+	const actions = Array.isArray(input.actions)
+		? input.actions as FindingRequest['actions']
+		: undefined;
+	if (!method && !url && !body && !payload && !actions) {
 		return undefined;
 	}
-	return { method, url, body, tool: 'poc-request' };
+	return { method, url, body, payload, actions, tool: payload ? 'poc-xss-canary' : actions ? 'poc-act' : 'poc-request' };
 }
 
 function formatRequestBlock(request: FindingRequestShape): string {

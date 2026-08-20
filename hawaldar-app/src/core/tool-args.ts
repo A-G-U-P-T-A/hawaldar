@@ -197,6 +197,8 @@ export function captureProbe(toolId: string, input: Record<string, unknown>, res
 		body: fromJson?.body || (typeof input.body === 'string' ? input.body : undefined),
 		status: fromJson?.status,
 		stdout: stdout.slice(0, 8_000),
+		payload: typeof input.payload === 'string' ? input.payload : undefined,
+		actions: Array.isArray(input.actions) ? input.actions as ProbeSnippet['actions'] : undefined,
 	};
 	rememberProbe(snippet);
 }

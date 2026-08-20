@@ -8,8 +8,9 @@ import { loadDotenvFiles } from './env-files';
 import { WORKING_MEMORY_TEMPLATE, sanitizeWorkingMemoryUpdate } from './working-memory';
 import { EngagementTracker, type EngagementRun } from './engagement-tracker';
 import { ApprovalsStore } from './approvals-store';
-import { FindingsStore, type FindingFilter } from './findings-store';
+import { FindingsStore, type FindingFilter, type FindingRecord } from './findings-store';
 import { NotesStore } from './notes-store';
+import { ReportsStore, type ReportFilter } from './reports-store';
 import { buildKnowledgeGraph, formatRagContext, KnowledgeStore, tryCreateRouterEmbedder } from './knowledge';
 import {
 	engagementAgentPrompt,
@@ -67,7 +68,8 @@ import { isResumeIntent, mastraMemoryOptions } from './stream-text';
 import { definedToolResult, type HitlAsk } from './hitl';
 import { executeTool, type ExecuteToolOptions } from './tools/index';
 import { buildBrowserInputSchema } from './tools/browser';
-import { buildFindingInputSchema, isFindingTool, renderFindingsReport, saveReportArtifact } from './tools/findings';
+import { buildFindingInputSchema, isFindingTool, persistFindingsPdf } from './tools/findings';
+import { appendRetestEvidence, asProbeRunResult, evaluateRetest, mergeRetestRequest, resolveRetestTool, retestToolInput } from './tools/finding-retest';
 import { buildMetasploitInputSchema } from './tools/metasploit';
 import { buildPocInputSchema } from './tools/poc';
 import { buildResearchInputSchema } from './tools/research';
@@ -117,6 +119,7 @@ export class HawaldarRuntime {
 	readonly tasks: TaskStore;
 	readonly sessions: SessionMetaStore;
 	readonly findings: FindingsStore;
+	readonly reports: ReportsStore;
 	readonly approvals: ApprovalsStore;
 	readonly engagement = new EngagementTracker();
 	knowledge: KnowledgeStore | undefined;
@@ -141,12 +144,15 @@ export class HawaldarRuntime {
 		this.tasks = new TaskStore(this.dataDir);
 		this.sessions = new SessionMetaStore(this.dataDir);
 		this.findings = new FindingsStore(this.dataDir);
+		this.reports = new ReportsStore(this.dataDir);
 		this.approvals = new ApprovalsStore(this.dataDir);
 		this.ready = this.boot();
 	}
 
 	private async boot(): Promise<void> {
-		await Promise.all([this.playbooks.ready, this.notes.ready, this.tasks.ready, this.sessions.ready, this.findings.ready, this.approvals.ready]);
+		await Promise.all([this.playbooks.ready, this.notes.ready, this.tasks.ready, this.sessions.ready, this.approvals.ready]);
+		await this.findings.ready;
+		await this.reports.ready;
 		await this.reload();
 	}
 
@@ -684,9 +690,29 @@ export class HawaldarRuntime {
 			askHitl: this.hitlAsk ? (req) => this.hitlAsk!(req) : undefined,
 			knowledge: this.knowledge,
 			findings: this.findings,
+			reports: this.reports,
 			approvals: this.approvals,
+			sessionId: this.activeThreadId,
+			runId: this.engagement.current()?.runId,
 			...extra,
 		};
+	}
+
+	private async chatTitleFor(sessionId?: string): Promise<string> {
+		const id = String(sessionId || this.activeThreadId || '').trim();
+		if (!id) {
+			return '';
+		}
+		try {
+			const meta = await this.sessions.get(id);
+			const title = String(meta?.title || '').trim();
+			if (isPlaceholderSessionTitle(title)) {
+				return '';
+			}
+			return title;
+		} catch {
+			return '';
+		}
 	}
 
 	private agentMemory(threadId: string, readOnly?: boolean, skipRecall?: boolean) {
@@ -729,7 +755,7 @@ export class HawaldarRuntime {
 		const ragHits = skipRag || !this.knowledge
 			? []
 			: await this.knowledge.search(restoredPrompt, { topK: 8, threadId }).catch(() => []);
-		const ragContext = skipRag ? '' : formatRagContext(ragHits);
+		const ragContext = skipRag ? '' : formatRagContext(ragHits, threadId);
 		const role = AGENT_ROLES.find((item) => item.id === agentId);
 		const instructions = restoreTargetPlaceholders(`${this.prompts.instructionsFor(
 			agentId,
@@ -1211,6 +1237,7 @@ export class HawaldarRuntime {
 					}, this.toolExecOptions({
 						workflow: def,
 						impliedTargets,
+						chatTitle: await this.chatTitleFor(resume?.threadId || this.activeThreadId),
 					}));
 					return `## ${step.id}\n${toolOutputText(result)}`;
 				} catch (error) {
@@ -1249,10 +1276,10 @@ export class HawaldarRuntime {
 					output = await this.runPocFallback(step.id, typeof input.target === 'string' ? input.target : workflowTarget, settings, impliedTargets, prior);
 				}
 				if (step.id === 'reporting') {
-					const findings = await this.findings.list();
+					const findings = await this.findings.list({ sessionId: threadId });
 					const table = formatFindingsChatTable(findings);
 					const exportNote = findings.length
-						? `finding-export wrote the Markdown artifact under ~/.hawaldar/workspace/reports. The table above is this session's findings store.`
+						? `finding-export wrote the PDF artifact under ~/.hawaldar/workspace/reports. The table above is this chat's findings store.`
 						: '';
 					output = gateReportingNarrative(output, prior, table, exportNote);
 				}
@@ -1380,6 +1407,10 @@ export class HawaldarRuntime {
 		return this.findings.onChange(listener);
 	}
 
+	onReportsChanged(listener: () => void): () => void {
+		return this.reports.onChange(listener);
+	}
+
 	async listFindings(filter?: FindingFilter) {
 		await this.ready;
 		return this.findings.list(filter);
@@ -1400,17 +1431,134 @@ export class HawaldarRuntime {
 		return this.approvals.clear();
 	}
 
-	async exportFindingsReport(input?: { title?: string; target?: string }) {
+	async exportFindingsReport(input?: {
+		title?: string;
+		target?: string;
+		sessionId?: string;
+		runId?: string;
+		query?: string;
+	}) {
 		await this.ready;
-		const rows = await this.findings.list();
 		const implied = this.impliedTargets;
 		const target = restoreTargetPlaceholders(input?.target?.trim() || implied[0] || '', implied);
-		const markdown = renderFindingsReport(rows, {
+		const sessionId = input?.sessionId?.trim() || '';
+		const runId = input?.runId?.trim() || this.engagement.current()?.runId || '';
+		const rows = await this.findings.list({
+			sessionId: sessionId || undefined,
+			runId: runId || undefined,
+			target: target || undefined,
+			query: input?.query,
+		});
+		const chatTitle = await this.chatTitleFor(sessionId);
+		const saved = await persistFindingsPdf({
+			store: this.findings,
+			reports: this.reports,
+			findings: rows,
 			title: input?.title?.trim() || 'Engagement report',
 			target,
+			sessionId,
+			chatTitle,
+			runId,
+			query: input?.query || target,
+			implied,
 		});
-		const saved = saveReportArtifact(markdown, target, implied);
-		return { ...saved, findings: rows.length, table: formatFindingsChatTable(rows) };
+		return { ...saved, table: formatFindingsChatTable(rows) };
+	}
+
+	async listReports(filter?: ReportFilter) {
+		await this.ready;
+		return this.reports.list(filter);
+	}
+
+	async readReport(id: string): Promise<Uint8Array> {
+		await this.ready;
+		return this.reports.readBytes(id);
+	}
+
+	async removeReport(id: string): Promise<void> {
+		await this.ready;
+		await this.reports.remove(id);
+	}
+
+	async createFindingsReport(filter: {
+		title?: string;
+		target?: string;
+		sessionId?: string;
+		runId?: string;
+		query?: string;
+	} = {}) {
+		return this.exportFindingsReport(filter);
+	}
+
+	async informFinding(id: string): Promise<FindingRecord> {
+		await this.ready;
+		const existing = await this.findings.get(id);
+		if (!existing) {
+			throw new Error(`Unknown finding: ${id}`);
+		}
+		const allowed = existing.status === 'confirmed'
+			|| (existing.status === 'unconfirmed' && Boolean(existing.evidence));
+		if (!allowed) {
+			throw new Error('Inform is available after a confirmed finding (or unconfirmed with evidence).');
+		}
+		return this.findings.upsert({
+			id: existing.id,
+			status: 'informed',
+			informedAt: Date.now(),
+		});
+	}
+
+	async retestFinding(id: string) {
+		await this.ready;
+		const existing = await this.findings.get(id);
+		if (!existing) {
+			throw new Error(`Unknown finding: ${id}`);
+		}
+		const tool = resolveRetestTool(existing);
+		const input = retestToolInput(existing);
+		if (!tool || !input) {
+			throw new Error('This finding has no stored poc-request / poc-act / poc-xss-canary / sqlmap-scan to replay.');
+		}
+		const settings = await this.store.read();
+		this.settings = settings;
+		const impliedTargets = [existing.target, existing.request?.url].filter((item): item is string => Boolean(item));
+		const result = asProbeRunResult(await toolExecContext.run({ impliedTargets, lastProbes: [] }, () => executeTool(settings, tool, input, this.toolExecOptions({
+			sourceAgentId: 'retest',
+			sessionId: existing.sessionId || this.activeThreadId,
+			runId: this.engagement.current()?.runId || existing.runId,
+			impliedTargets,
+		}))));
+		const judged = evaluateRetest(existing, result);
+		if (judged.verdict === 'aborted') {
+			return {
+				ok: false,
+				verdict: judged.verdict,
+				reason: judged.reason,
+				id: existing.id,
+				status: existing.status,
+				offerReport: false,
+			};
+		}
+		const evidence = appendRetestEvidence(existing.evidence, String(result.stdout || judged.reason), judged.verdict);
+		const status = judged.verdict === 'fixed'
+			? 'fixed' as const
+			: (existing.status === 'informed' ? 'informed' as const : 'confirmed' as const);
+		const record = await this.findings.upsert({
+			id: existing.id,
+			status,
+			evidence,
+			request: mergeRetestRequest(existing.request, String(result.stdout || '')),
+			sessionId: existing.sessionId,
+			runId: existing.runId,
+		});
+		return {
+			ok: true,
+			verdict: judged.verdict,
+			reason: judged.reason,
+			id: record.id,
+			status: record.status,
+			offerReport: judged.verdict === 'fixed',
+		};
 	}
 
 	snapshot() {
@@ -1628,13 +1776,35 @@ export class HawaldarRuntime {
 		if (!this.knowledge) {
 			return;
 		}
-		const title = (await this.sessions.get(threadId))?.title || 'Chat';
-		const text = `User: ${prompt.trim()}\n\nAssistant: ${clipSnippet(reply, 2400)}`;
+		const session = await this.sessions.get(threadId);
+		const title = chatRagTitle(session?.title || 'Chat', threadId);
+		const history = await this.listThreadHistory(threadId, { limit: 80 });
+		const transcript = formatChatTranscript(history.messages);
+		const fallback = `User: ${prompt.trim()}\n\nAssistant: ${clipSnippet(reply, 2400)}`;
 		await this.knowledge.ingestText({
 			kind: 'chat',
 			sourceId: threadId,
 			title,
+			text: transcript || fallback,
+		});
+	}
+
+	private async ingestSessionHistory(sessionId: string, title: string, snippet?: string, updatedAt?: number): Promise<void> {
+		if (!this.knowledge) {
+			return;
+		}
+		const history = await this.listThreadHistory(sessionId, { limit: 80 });
+		const transcript = formatChatTranscript(history.messages);
+		const text = transcript || snippet || '';
+		if (!text.trim()) {
+			return;
+		}
+		await this.knowledge.ingestText({
+			kind: 'chat',
+			sourceId: sessionId,
+			title: chatRagTitle(title || 'Chat', sessionId),
 			text,
+			updatedAt,
 		});
 	}
 
@@ -1655,16 +1825,7 @@ export class HawaldarRuntime {
 			await this.ingestTask(task.id);
 		}
 		for (const session of await this.sessions.list()) {
-			if (!session.snippet) {
-				continue;
-			}
-			await this.knowledge.ingestText({
-				kind: 'chat',
-				sourceId: session.id,
-				title: session.title || 'Chat',
-				text: session.snippet,
-				updatedAt: session.updatedAt,
-			});
+			await this.ingestSessionHistory(session.id, session.title || 'Chat', session.snippet, session.updatedAt);
 		}
 		await this.ingestPlaybooks();
 		await this.knowledge.ingestKnowledgeDir();
@@ -1775,12 +1936,11 @@ export class HawaldarRuntime {
 			: false;
 		const workingMemory = {
 			enabled: true,
-			scope: 'thread',
+			scope: 'thread' as const,
 			template: WORKING_MEMORY_TEMPLATE,
 		};
 		const baseOptions = {
 			lastMessages: 40,
-			// Mastra-generated titles are a fallback only; session_meta titles (first prompt / rename) win in listThreads.
 			generateTitle: true,
 			workingMemory,
 		};
@@ -1929,6 +2089,7 @@ export class HawaldarRuntime {
 					this.toolExecOptions({
 						hitlContext: context as ExecuteToolOptions['hitlContext'],
 						sourceAgentId: TOOL_CATALOG.find((tool) => tool.id === id)?.agentId,
+						chatTitle: await this.chatTitleFor(),
 					}),
 				);
 				return result ?? definedToolResult('Waiting for operator approval.');
@@ -2180,6 +2341,23 @@ export class HawaldarRuntime {
 			}),
 		});
 	}
+}
+
+function chatRagTitle(title: string, threadId: string): string {
+	const slice = threadId.slice(0, 8);
+	const name = title.trim() || 'Chat';
+	return `Chat · ${name} · ${slice}`;
+}
+
+function formatChatTranscript(messages: ThreadHistoryMessage[]): string {
+	if (messages.length === 0) {
+		return '';
+	}
+	return messages.map((item) => {
+		const role = item.role === 'user' ? 'User' : 'Assistant';
+		const text = item.text.length > 4_000 ? `${item.text.slice(0, 4_000)}…` : item.text;
+		return `${role}: ${text}`;
+	}).join('\n\n');
 }
 
 function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
