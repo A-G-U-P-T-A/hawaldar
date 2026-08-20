@@ -26,6 +26,17 @@ interface SimNode {
 
 const BG = 0x1e1e1e;
 
+function graphPalette() {
+	const light = document.documentElement.dataset.theme === 'light';
+	return {
+		bg: light ? 0xf3f3f3 : BG,
+		line: light ? 0x1a1a1a : 0xffffff,
+		lineOpacity: light ? 0.22 : 0.2,
+		labelBg: light ? 'rgba(255,255,255,0.9)' : 'rgba(18,18,18,0.62)',
+		labelFg: light ? '#1a1a1a' : '#e8e8e8',
+	};
+}
+
 export default function GraphScene({ nodes, links, onSelect, onReady }: Props) {
 	const hostRef = useRef<HTMLDivElement>(null);
 	const tipRef = useRef<HTMLDivElement>(null);
@@ -58,14 +69,15 @@ export default function GraphScene({ nodes, links, onSelect, onReady }: Props) {
 		}
 
 		const scene = new THREE.Scene();
-		scene.background = new THREE.Color(BG);
-		scene.fog = new THREE.Fog(BG, 48, 160);
+		const pal0 = graphPalette();
+		scene.background = new THREE.Color(pal0.bg);
+		scene.fog = new THREE.Fog(pal0.bg, 48, 160);
 
 		const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 400);
 		camera.position.set(0, 10, 32);
 
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-		renderer.setClearColor(BG, 1);
+		renderer.setClearColor(pal0.bg, 1);
 		renderer.domElement.style.display = 'block';
 		renderer.domElement.style.width = '100%';
 		renderer.domElement.style.height = '100%';
@@ -124,6 +136,23 @@ export default function GraphScene({ nodes, links, onSelect, onReady }: Props) {
 		applySize();
 		const ro = new ResizeObserver(applySize);
 		ro.observe(host);
+
+		const applyGraphTheme = () => {
+			const pal = graphPalette();
+			scene.background = new THREE.Color(pal.bg);
+			scene.fog = new THREE.Fog(pal.bg, 48, 160);
+			renderer.setClearColor(pal.bg, 1);
+			if (linkLines) {
+				const mat = linkLines.material as THREE.LineBasicMaterial;
+				mat.color.setHex(pal.line);
+				mat.opacity = pal.lineOpacity;
+			}
+			for (const sim of sims.values()) {
+				refreshLabel(sim.label, sim.dto.title);
+			}
+		};
+		const themeObs = new MutationObserver(applyGraphTheme);
+		themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 		const rebuild = () => {
 			const nextNodes = nodesRef.current;
@@ -199,9 +228,10 @@ export default function GraphScene({ nodes, links, onSelect, onReady }: Props) {
 			}
 			const geo = new THREE.BufferGeometry();
 			geo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
+			const pal = graphPalette();
 			linkLines = new THREE.LineSegments(
 				geo,
-				new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.2 }),
+				new THREE.LineBasicMaterial({ color: pal.line, transparent: true, opacity: pal.lineOpacity }),
 			);
 			scene.add(linkLines);
 		};
@@ -377,6 +407,7 @@ export default function GraphScene({ nodes, links, onSelect, onReady }: Props) {
 			rebuildRef.current = () => {};
 			cancelAnimationFrame(raf);
 			ro.disconnect();
+			themeObs.disconnect();
 			renderer.domElement.removeEventListener('pointerdown', onPointerDown);
 			renderer.domElement.removeEventListener('pointermove', onPointerMove);
 			renderer.domElement.removeEventListener('pointerup', onPointerUp);
@@ -468,13 +499,14 @@ function labelTexture(title: string): THREE.CanvasTexture {
 	if (ctx) {
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		const text = title.trim() || 'Untitled';
-		ctx.font = '600 36px "Segoe UI", system-ui, sans-serif';
+		ctx.font = '600 36px Poppins, system-ui, sans-serif';
 		const width = Math.min(ctx.measureText(text).width + 36, 492);
 		const x = (canvas.width - width) / 2;
-		ctx.fillStyle = 'rgba(18, 18, 18, 0.62)';
+		const pal = graphPalette();
+		ctx.fillStyle = pal.labelBg;
 		roundRect(ctx, x, 36, width, 56, 16);
 		ctx.fill();
-		ctx.fillStyle = '#e8e8e8';
+		ctx.fillStyle = pal.labelFg;
 		ctx.textAlign = 'center';
 		ctx.textBaseline = 'middle';
 		ctx.fillText(text, canvas.width / 2, 64, width - 28);

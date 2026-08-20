@@ -459,7 +459,7 @@ Confirmed findings must quote method + URL (127.0.0.1) + status + body snippet.`
 		{ cmd: 'vuln-detect', label: '/vuln-detect', detail: 'Parallel vuln-class hypotheses (recorded as findings)', insert: '/vuln-detect ', kind: 'workflow' },
 		{ cmd: 'poc-validate', label: '/poc-validate', detail: 'Prove hypotheses with bounded PoC probes (HITL)', insert: '/poc-validate ', kind: 'workflow' },
 		{ cmd: 'validate', label: '/validate', detail: 'Confirmed vs unconfirmed from evidence', insert: '/validate ', kind: 'workflow' },
-		{ cmd: 'report', label: '/report', detail: 'Markdown engagement report', insert: '/report ', kind: 'workflow' },
+		{ cmd: 'report', label: '/report', detail: 'PDF engagement report', insert: '/report ', kind: 'workflow' },
 		{ cmd: 'correlate-report', label: '/correlate-report', detail: 'Validate then report', insert: '/correlate-report ', kind: 'workflow' },
 		{ ...LOCAL_SLASH },
 		{ ...BROWSER_SEARCH_SLASH },

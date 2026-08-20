@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { TaskListDTO, TaskTagDTO } from '../../preload/api';
+import { CloseIcon } from './navIcons';
 import Dropdown from './Dropdown';
 
 interface Draft {
@@ -198,7 +199,7 @@ export default function TaskModal({
 										onClick={() => setTagIds((prev) => prev.filter((item) => item !== id))}
 									>
 										{tag.title}
-										<span aria-hidden="true">×</span>
+										<CloseIcon size={14} />
 									</button>
 								);
 							})}

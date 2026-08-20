@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import Icon from './Icon';
 
 export interface DropdownBadge {
 	text: string;
@@ -336,7 +337,7 @@ export default function Dropdown({
 				<span className="dd-value" title={selected?.label || value || placeholder}>
 					{selected?.label || value || placeholder}
 				</span>
-				<span className="dd-caret" aria-hidden>▾</span>
+				<span className="dd-caret" aria-hidden><Icon name="expand_more" size={18} /></span>
 			</button>
 			{menu}
 		</div>

@@ -507,7 +507,7 @@ export class KnowledgeStore {
 	}
 }
 
-export function formatRagContext(hits: KnowledgeHit[]): string {
+export function formatRagContext(hits: KnowledgeHit[], currentThreadId?: string): string {
 	if (hits.length === 0) {
 		return '';
 	}
@@ -517,7 +517,14 @@ export function formatRagContext(hits: KnowledgeHit[]): string {
 	];
 	for (const hit of hits) {
 		const body = clipSnippet(hit.text, 700);
-		lines.push(`- [${hit.kind}/${hit.mode} · ${hit.title}] ${body}`);
+		const otherChat = hit.kind === 'chat' && hit.sourceId && currentThreadId && hit.sourceId !== currentThreadId;
+		const thisChat = hit.kind === 'chat' && hit.sourceId && currentThreadId && hit.sourceId === currentThreadId;
+		const label = otherChat
+			? `OTHER CHAT (${hit.title}, ${hit.sourceId}) — supporting context, not this run`
+			: thisChat
+				? `THIS CHAT (${hit.title}, ${hit.sourceId.slice(0, 8)})`
+				: `${hit.kind}/${hit.mode} · ${hit.title}`;
+		lines.push(`- [${label}] ${body}`);
 	}
 	return lines.join('\n');
 }

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import type { HitlKind } from '../../preload/api';
+import Icon from './Icon';
 import { useI18n } from './i18n';
 
 interface Props {
@@ -41,9 +42,7 @@ export default function HitlConfirm({ title, explanation, kind, serviceId, busy 
 			<section className="quit-card widget hitl-card" role="dialog" aria-modal="true" aria-labelledby="hitl-title">
 				<div className="hitl-head">
 					<span className="hitl-shield" aria-hidden>
-						<svg viewBox="0 0 16 16" fill="currentColor">
-							<path d="M8 1.6 3 3.7v3.5c0 3.1 2.1 5.9 5 7.2 2.9-1.3 5-4.1 5-7.2V3.7L8 1.6zm2.7 5-3.2 3.4a.75.75 0 0 1-1.1 0L5.2 8.7a.75.75 0 1 1 1.1-1l1.2 1.3L9.6 5.5a.75.75 0 1 1 1.1 1z" />
-						</svg>
+						<Icon name="shield" size={20} filled />
 					</span>
 					<div className="hitl-head-text">
 						<div className="hitl-eyebrow">

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type DragEvent } from 'react';
 import type { TaskBoardDTO, TaskDTO, TaskListDTO } from '../../preload/api';
+import { DragIcon, CloseIcon } from './navIcons';
 import Dropdown from './Dropdown';
 import { fuzzyMatch } from './sessionGroups';
 
@@ -231,7 +232,7 @@ export default function TaskBoard({
 										}}
 										onDragEnd={clearDrag}
 									>
-										⋮⋮
+										<DragIcon size={16} />
 									</span>
 								)}
 								{editing ? (
@@ -259,7 +260,7 @@ export default function TaskBoard({
 										aria-label={`Remove ${list.title}`}
 										onClick={() => askRemove(list)}
 									>
-										×
+										<CloseIcon size={16} />
 									</button>
 								)}
 							</header>

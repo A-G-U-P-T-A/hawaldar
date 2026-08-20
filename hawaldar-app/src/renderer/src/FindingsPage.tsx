@@ -1,14 +1,27 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
+	CatalogItem,
 	EngagementRunDTO,
 	FindingClass,
 	FindingDTO,
 	FindingSeverity,
 	FindingStatus,
 } from '../../preload/api';
-import { FindingsIcon } from './navIcons';
+import { FindingsIcon, DeleteIcon } from './navIcons';
 import { restoreRedactedAddresses } from './keepAddresses';
 import { useI18n } from './i18n';
+import Dropdown from './Dropdown';
+import {
+	ALL_CHATS,
+	THIS_CHAT,
+	canInformFinding,
+	canRetestFinding,
+	chatIdSlice,
+	isUnassignedSession,
+	threadLabel,
+	toFindingsListFilter,
+	useFindingsChatScope,
+} from './findingsScope';
 
 const SEVERITIES: FindingSeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
 const SEV_RANK: Record<FindingSeverity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
@@ -19,6 +32,8 @@ const STATUS_CHIPS: Array<{ id: FindingStatus | 'all'; labelKey: string }> = [
 	{ id: 'hypothesis', labelKey: 'findings.hypothesis' },
 	{ id: 'unconfirmed', labelKey: 'findings.unconfirmed' },
 	{ id: 'not-exploitable', labelKey: 'findings.notExploitable' },
+	{ id: 'informed', labelKey: 'findings.informed' },
+	{ id: 'fixed', labelKey: 'findings.fixed' },
 ];
 
 const CLASS_CHIPS: FindingClass[] = ['injection', 'xss', 'ssrf', 'auth', 'csrf', 'ssti', 'idor', 'version', 'other'];
@@ -54,9 +69,16 @@ function fmtTime(ts: number): string {
 	}
 }
 
-export default function FindingsPage() {
+export default function FindingsPage({
+	activeSessionId,
+	onOpenReport,
+}: {
+	activeSessionId?: string;
+	onOpenReport?: (id: string, title: string) => void;
+}) {
 	const { t } = useI18n();
 	const [findings, setFindings] = useState<FindingDTO[]>([]);
+	const [threads, setThreads] = useState<CatalogItem[]>([]);
 	const [loaded, setLoaded] = useState(false);
 	const [run, setRun] = useState<EngagementRunDTO | null>(null);
 	const [error, setError] = useState('');
@@ -67,19 +89,32 @@ export default function FindingsPage() {
 	const [sevFilter, setSevFilter] = useState<FindingSeverity | null>(null);
 	const [statusFilter, setStatusFilter] = useState<FindingStatus | 'all'>('all');
 	const [classFilter, setClassFilter] = useState<FindingClass | 'all'>('all');
+	const [chatFilter, setChatFilter] = useFindingsChatScope(activeSessionId);
+	const [targetQuery, setTargetQuery] = useState('');
+	const [busyId, setBusyId] = useState<string | null>(null);
 	const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 	const [now, setNow] = useState(() => Date.now());
 
+	const listFilter = useMemo(
+		() => toFindingsListFilter(chatFilter, activeSessionId, targetQuery.trim() || undefined),
+		[chatFilter, activeSessionId, targetQuery],
+	);
+
 	const refresh = useCallback(async () => {
 		try {
-			setFindings(await window.hawaldar.listFindings());
+			const [rows, chats] = await Promise.all([
+				window.hawaldar.listFindings(listFilter),
+				window.hawaldar.listThreads().catch(() => [] as CatalogItem[]),
+			]);
+			setFindings(rows);
+			setThreads(chats);
 			setError('');
 		} catch (err) {
 			setError(errText(err));
 		} finally {
 			setLoaded(true);
 		}
-	}, []);
+	}, [listFilter]);
 
 	useEffect(() => {
 		void refresh();
@@ -145,8 +180,63 @@ export default function FindingsPage() {
 		setExportBusy(true);
 		setError('');
 		try {
-			const result = await window.hawaldar.exportFindingsReport({});
-			setReportNote(`Report saved: ${result.displayPath} (${result.findings} finding${result.findings === 1 ? '' : 's'})`);
+			const result = await window.hawaldar.exportFindingsReport({
+				sessionId: listFilter.sessionId || undefined,
+				target: listFilter.target,
+			});
+			setReportNote(t('findings.reportSaved', { path: result.displayPath, count: result.findings }));
+			if (result.id) {
+				onOpenReport?.(result.id, result.title || t('findings.title'));
+			}
+		} catch (err) {
+			setError(errText(err));
+		} finally {
+			setExportBusy(false);
+		}
+	};
+
+	const inform = async (id: string) => {
+		setBusyId(id);
+		setError('');
+		try {
+			await window.hawaldar.informFinding(id);
+			await refresh();
+		} catch (err) {
+			setError(errText(err));
+		} finally {
+			setBusyId(null);
+		}
+	};
+
+	const retest = async (finding: FindingDTO) => {
+		setBusyId(finding.id);
+		setError('');
+		try {
+			const result = await window.hawaldar.retestFinding(finding.id);
+			setReportNote(result.reason);
+			await refresh();
+			if (result.offerReport) {
+				setReportNote(`${result.reason} ${t('findings.offerReport')}`);
+			}
+		} catch (err) {
+			setError(errText(err));
+		} finally {
+			setBusyId(null);
+		}
+	};
+
+	const exportOne = async (finding: FindingDTO) => {
+		setExportBusy(true);
+		setError('');
+		try {
+			const result = await window.hawaldar.exportFindingsReport({
+				title: finding.title,
+				sessionId: finding.sessionId || undefined,
+				target: finding.target || undefined,
+			});
+			if (result.id) {
+				onOpenReport?.(result.id, finding.title);
+			}
 		} catch (err) {
 			setError(errText(err));
 		} finally {
@@ -193,8 +283,14 @@ export default function FindingsPage() {
 		}
 	};
 
-	const confirmedCount = findings.filter((finding) => finding.status === 'confirmed').length;
+	const confirmedCount = findings.filter((finding) => finding.status === 'confirmed' || finding.status === 'informed').length;
 	const filtering = Boolean(sevFilter) || statusFilter !== 'all' || classFilter !== 'all';
+	const chatOptions = [
+		{ value: THIS_CHAT, label: t('findings.thisChat') },
+		{ value: ALL_CHATS, label: t('findings.allChats') },
+		...threads.map((item) => ({ value: item.id, label: threadLabel(item) })),
+	];
+	const threadById = useMemo(() => new Map(threads.map((item) => [item.id, item])), [threads]);
 
 	return (
 		<div className="findings-page">
@@ -240,6 +336,23 @@ export default function FindingsPage() {
 						{confirmClear ? t('findings.confirmClear') : t('findings.clear')}
 					</button>
 				</div>
+			</div>
+			<div className="findings-scope">
+				<Dropdown
+					compact
+					value={chatFilter}
+					options={chatOptions}
+					onChange={setChatFilter}
+					ariaLabel={t('findings.filterChat')}
+				/>
+				<input
+					type="search"
+					className="findings-target-search"
+					value={targetQuery}
+					onChange={(event) => setTargetQuery(event.target.value)}
+					placeholder={t('findings.filterTarget')}
+					aria-label={t('findings.filterTarget')}
+				/>
 			</div>
 			{reportNote && <div className="findings-report-note">{reportNote}</div>}
 
@@ -362,6 +475,10 @@ export default function FindingsPage() {
 									<span className="finding-title" title={restoreRedactedAddresses(finding.title)}>{restoreRedactedAddresses(finding.title)}</span>
 									<span className="finding-meta" title={restoreRedactedAddresses(finding.target)}>
 										{restoreRedactedAddresses(finding.target)}
+										{isUnassignedSession(finding.sessionId)
+											? ` · ${t('findings.unassignedChat')}`
+											: ` · ${threadById.get(finding.sessionId)?.label || t('findings.chat')} ${chatIdSlice(finding.sessionId)}`}
+										{finding.reportId ? ` · ${t('findings.reportId')} ${finding.reportId}` : ''}
 										{finding.source ? ` · ${finding.source}` : ''}
 										{finding.updatedAt ? ` · ${fmtTime(finding.updatedAt)}` : ''}
 									</span>
@@ -370,6 +487,36 @@ export default function FindingsPage() {
 								<span className={`finding-status-pill st-${finding.status}`}>
 									{finding.status.replace('-', ' ')}
 								</span>
+								{canInformFinding(finding) && (
+									<button
+										type="button"
+										className="btn finding-action"
+										disabled={busyId === finding.id}
+										onClick={() => void inform(finding.id)}
+									>
+										{t('findings.inform')}
+									</button>
+								)}
+								{canRetestFinding(finding) && (
+									<button
+										type="button"
+										className="btn finding-action"
+										disabled={busyId === finding.id}
+										onClick={() => void retest(finding)}
+									>
+										{busyId === finding.id ? t('findings.retesting') : t('findings.retest')}
+									</button>
+								)}
+								{finding.status === 'fixed' && (
+									<button
+										type="button"
+										className="btn finding-action"
+										disabled={exportBusy}
+										onClick={() => void exportOne(finding)}
+									>
+										{t('findings.generatePdf')}
+									</button>
+								)}
 								<button
 									type="button"
 									className={`finding-delete${confirmDeleteId === finding.id ? ' confirm' : ''}`}
@@ -378,7 +525,7 @@ export default function FindingsPage() {
 									onClick={() => void removeFinding(finding.id)}
 									onBlur={() => setConfirmDeleteId((current) => (current === finding.id ? null : current))}
 								>
-									{confirmDeleteId === finding.id ? 'Sure?' : '×'}
+									{confirmDeleteId === finding.id ? 'Sure?' : <DeleteIcon size={16} />}
 								</button>
 							</div>
 							{open && (

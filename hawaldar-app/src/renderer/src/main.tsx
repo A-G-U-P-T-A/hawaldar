@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { toDisplayText } from './displayText';
 import { I18nProvider } from './i18n';
+import { ThemeProvider } from './theme';
 import './styles.css';
 
 function hasDesktopApi(): boolean {
@@ -64,7 +65,11 @@ function Root() {
 	}
 	return (
 		<I18nProvider>
-			<App />
+			<ThemeProvider>
+				<RendererErrorBoundary>
+					<App />
+				</RendererErrorBoundary>
+			</ThemeProvider>
 		</I18nProvider>
 	);
 }

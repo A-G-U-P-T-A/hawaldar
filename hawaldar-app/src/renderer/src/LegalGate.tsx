@@ -1,5 +1,6 @@
 import type { LegalDocumentDTO } from '../../preload/api';
 import { LanguagePicker, useI18n } from './i18n';
+import { ThemePicker } from './theme';
 import LegalTerms from './LegalTerms';
 import PageShell from './PageShell';
 
@@ -14,7 +15,12 @@ interface Props {
 export default function LegalGate({ document, busy = false, error, onAccept, onDecline }: Props) {
 	const { t } = useI18n();
 	return (
-		<PageShell title={t('legal.title')} actions={<LanguagePicker id="legal-locale" />}>
+		<PageShell title={t('legal.title')} actions={(
+			<>
+				<ThemePicker id="legal-theme" />
+				<LanguagePicker id="legal-locale" />
+			</>
+		)}>
 			<section className="widget legal-widget">
 				<div className="widget-head">
 					<h2 className="widget-title">{t('legal.agreement')}</h2>

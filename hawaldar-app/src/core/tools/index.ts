@@ -2,6 +2,7 @@ import { formatChatError } from '../chat-messages';
 import { formatScanActivityDetail, scanMetaFromResult, type ChatActivity } from '../chat-activity';
 import type { ApprovalsStore } from '../approvals-store';
 import type { FindingsStore } from '../findings-store';
+import type { ReportsStore } from '../reports-store';
 import { definedToolResult, ensureRuntimeHitl, USER_DECLINED, type HitlAsk, type HitlToolContext } from '../hitl';
 import { evaluateToolRules, type RuleRecord, type WorkflowRecord } from '../playbook-store';
 import { fillImpliedToolTarget, parseTargetRef, rejectForbiddenTool, resolveImpliedTargets, restoreTargetPlaceholders, skipReasonForTool } from '../policy';
@@ -100,9 +101,13 @@ export interface ExecuteToolOptions {
 	persistEnginePath?: (podmanPath: string) => Promise<void>;
 	knowledge?: KnowledgeStore;
 	findings?: FindingsStore;
+	reports?: ReportsStore;
 	approvals?: ApprovalsStore;
 	/** Recording agent id (finding-record source). */
 	sourceAgentId?: string;
+	sessionId?: string;
+	runId?: string;
+	chatTitle?: string;
 }
 
 function toolTargetDetail(input: ToolInput): string {
@@ -188,6 +193,10 @@ export async function executeTool(
 		}
 		const result = await runFindingTool(options.findings, id, coerced as Record<string, unknown>, {
 			source: options.sourceAgentId,
+			sessionId: options.sessionId,
+			runId: options.runId,
+			reports: options.reports,
+			chatTitle: options.chatTitle,
 		});
 		emitDone(id, result.ok, result.ok ? String(detail) : result.stderr);
 		return result;
@@ -553,6 +562,7 @@ async function finishToolResult(
 				id,
 				String(result.stdout || ''),
 				filled.target || filled.url || '',
+				{ sessionId: options.sessionId, runId: options.runId },
 			).catch(() => 0);
 		}
 	}

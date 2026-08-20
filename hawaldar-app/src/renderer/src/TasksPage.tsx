@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { TaskBoardDTO, TaskDTO, TaskTagDTO } from '../../preload/api';
-import { TasksIcon } from './navIcons';
+import { TasksIcon, CloseIcon } from './navIcons';
 import TaskBoard from './TaskBoard';
 import TaskModal from './TaskModal';
 
@@ -212,7 +212,7 @@ export default function TasksPage({
 									aria-label={`Delete ${tag.title}`}
 									onClick={() => askDeleteTag(tag)}
 								>
-									×
+									<CloseIcon size={14} />
 								</button>
 							</span>
 						);

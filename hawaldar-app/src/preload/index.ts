@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { ChatActivityEvent, ChatDeltaEvent, ChatHistoryQuery, ChatRequest, EngagementRunDTO, HawaldarAPI, HitlAskEvent, ListModelsRequest, NoteWrite, PodmanSetupProgress, PromptsWrite, QuitAskEvent, RuleWrite, SettingsWrite, TaskListWrite, TaskMove, TaskStatus, TaskTagWrite, TaskWrite, WorkflowWrite } from './api';
+import type { ChatActivityEvent, ChatDeltaEvent, ChatHistoryQuery, ChatRequest, EngagementRunDTO, FindingFilterDTO, HawaldarAPI, HitlAskEvent, ListModelsRequest, NoteWrite, PodmanSetupProgress, PromptsWrite, QuitAskEvent, ReportFilterDTO, RuleWrite, SettingsWrite, TaskListWrite, TaskMove, TaskStatus, TaskTagWrite, TaskWrite, WorkflowWrite } from './api';
 
 let lastQuitAsk: QuitAskEvent | null = null;
 let lastHitlAsk: HitlAskEvent | null = null;
@@ -33,15 +33,26 @@ const api: HawaldarAPI = {
 		return () => ipcRenderer.removeListener('chat.activity', handler);
 	},
 	runWorkflow: (key, input) => ipcRenderer.invoke('workflow.run', key, input),
-	listFindings: () => ipcRenderer.invoke('findings.list'),
+	listFindings: (filter?: FindingFilterDTO) => ipcRenderer.invoke('findings.list', filter ?? {}),
 	removeFinding: (id) => ipcRenderer.invoke('findings.remove', id),
 	clearFindings: () => ipcRenderer.invoke('findings.clear'),
 	exportFindingsReport: (input) => ipcRenderer.invoke('findings.export', input ?? {}),
+	informFinding: (id) => ipcRenderer.invoke('findings.inform', id),
+	retestFinding: (id) => ipcRenderer.invoke('findings.retest', id),
+	listReports: (filter?: ReportFilterDTO) => ipcRenderer.invoke('reports.list', filter ?? {}),
+	createReport: (input) => ipcRenderer.invoke('reports.create', input ?? {}),
+	readReport: (id) => ipcRenderer.invoke('reports.read', id),
+	removeReport: (id) => ipcRenderer.invoke('reports.remove', id),
 	getEngagementState: () => ipcRenderer.invoke('engagement.get'),
 	onFindingsChanged: (cb) => {
 		const handler = () => cb();
 		ipcRenderer.on('findings.changed', handler);
 		return () => ipcRenderer.removeListener('findings.changed', handler);
+	},
+	onReportsChanged: (cb) => {
+		const handler = () => cb();
+		ipcRenderer.on('reports.changed', handler);
+		return () => ipcRenderer.removeListener('reports.changed', handler);
 	},
 	onEngagementEvent: (cb) => {
 		const handler = (_: Electron.IpcRendererEvent, run: EngagementRunDTO) => cb(run);

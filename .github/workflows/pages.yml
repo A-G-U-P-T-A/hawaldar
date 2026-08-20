@@ -2,10 +2,9 @@ name: Pages
 
 on:
   push:
-    branches: [main]
-    paths:
-      - docs/**
-      - .github/workflows/pages.yml
+    branches:
+      - main
+      - 'release/**'
   workflow_dispatch:
 
 permissions:
@@ -29,6 +28,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Fetch all version tags
+        run: git fetch --tags --force origin
+      - name: Lay out versioned docs
+        run: python3 .github/scripts/snapshot-docs-versions.py
+      - name: Ensure .nojekyll
+        run: printf '\n' > docs/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs

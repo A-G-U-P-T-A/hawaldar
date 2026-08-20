@@ -231,14 +231,15 @@ function normalizeEpochNumber(value: number): number {
 	return Math.round(value);
 }
 
-const PLACEHOLDER_TITLES = new Set(['', 'new thread', 'new chat', 'untitled', 'chat']);
+const PLACEHOLDER_TITLES = new Set(['', 'new thread', 'new chat', 'untitled', 'chat', 'none', 'chat none']);
 
 export function isPlaceholderSessionTitle(title: string | undefined): boolean {
 	const trimmed = String(title ?? '').trim();
 	if (!trimmed) {
 		return true;
 	}
-	if (PLACEHOLDER_TITLES.has(trimmed.toLowerCase())) {
+	const lowered = trimmed.toLowerCase().replace(/\s+/g, ' ');
+	if (PLACEHOLDER_TITLES.has(lowered) || /^chat\s*[:\-]?\s*(none|untitled|new)?$/i.test(trimmed)) {
 		return true;
 	}
 	return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed);

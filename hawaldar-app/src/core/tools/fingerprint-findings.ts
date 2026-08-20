@@ -138,6 +138,7 @@ export async function recordFingerprintFindings(
 	toolId: string,
 	stdout: string,
 	target: string,
+	extra?: { sessionId?: string; runId?: string },
 ): Promise<number> {
 	const drafts = parseFingerprintFindings(toolId, stdout, target);
 	let saved = 0;
@@ -146,6 +147,8 @@ export async function recordFingerprintFindings(
 			await store.upsert({
 				...draft,
 				source: toolId,
+				sessionId: extra?.sessionId,
+				runId: extra?.runId,
 			});
 			saved += 1;
 		} catch {

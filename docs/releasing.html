@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Releasing — Hawaldar</title>
   <link rel="stylesheet" href="site.css" />
+  <script src="site.js" defer></script>
 </head>
 <body>
   <header>
@@ -18,6 +19,12 @@
         <a href="building.html">Build from source</a>
         <a href="releasing.html">Releasing</a>
       </nav>
+      <label class="version-wrap">
+        <select class="version-select" aria-label="Documentation version">
+          <option value="v0.1.0-beta.2" selected>v0.1.0-beta.2 (latest)</option>
+          <option value="v0.1.0-beta.1">v0.1.0-beta.1</option>
+        </select>
+      </label>
     </div>
   </header>
   <main class="wrap">
@@ -25,9 +32,10 @@
     <p>CI builds unsigned <strong>beta / prerelease</strong> artifacts. That is OK. Signing comes later via repository secrets — never commit certs or <code>.env</code> files.</p>
     <h2>Trigger</h2>
     <ul>
-      <li>Push a tag matching <code>v*</code> (example <code>v0.1.0-beta.1</code>)</li>
-      <li>Or Actions → Release → Run workflow (channel: beta)</li>
+      <li>Push a tag matching <code>v*</code> (example <code>v0.1.0-beta.2</code>)</li>
+      <li>Or Actions → Release → Run workflow and pass the existing tag</li>
     </ul>
+    <p>GitHub Pages deploys from <code>main</code> or <code>release/*</code> (the <code>github-pages</code> environment rejects tag refs). The Pages job snapshots each <code>v*</code> tag under <code>/v0.1.0-beta.2/</code> (and older tags under <code>/v…/</code>). Latest docs stay at the site root. The header version menu switches between them.</p>
     <h2>Matrix</h2>
     <ul>
       <li>Windows x64 NSIS (ia32 skipped; Electron 43)</li>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CatalogItem, HitlAskEvent, LegalStatusDTO } from '../../preload/api';
 import BrandMark from './BrandMark';
+import BootScreen from './BootScreen';
 import CatalogPage, { StatusPage } from './CatalogPage';
 import Chat from './Chat';
 import { isDocSaveHotkey, type DocEditorHandle } from './docEditor';
@@ -12,8 +13,11 @@ import LegalGate from './LegalGate';
 import NoteTab from './NoteTab';
 import PageShell from './PageShell';
 import { ContainerIcon, GearIcon } from './navIcons';
+import { ThemeToggle } from './theme';
 import PodmanPanel from './PodmanPanel';
 import QuitConfirm from './QuitConfirm';
+import ReportsPage from './ReportsPage';
+import ReportViewer from './ReportViewer';
 import SaveChangesConfirm from './SaveChangesConfirm';
 import Settings, { type SettingsCategory } from './Settings';
 import CommandMenu from './CommandMenu';
@@ -77,6 +81,8 @@ function AppMain() {
 	const [legal, setLegal] = useState<LegalStatusDTO | null>(null);
 	const [legalBusy, setLegalBusy] = useState(false);
 	const [legalError, setLegalError] = useState('');
+	const [booting, setBooting] = useState(true);
+	const [bootStatusKey, setBootStatusKey] = useState('boot.loading');
 	const [providerLabel, setProviderLabel] = useState('');
 	const [providerId, setProviderId] = useState('');
 	const [listEpoch, setListEpoch] = useState(0);
@@ -162,15 +168,36 @@ function AppMain() {
 
 	useEffect(() => {
 		let cancelled = false;
-		void window.hawaldar.getLegal().then((next) => {
-			if (!cancelled) {
+		void (async () => {
+			try {
+				setBootStatusKey('boot.legal');
+				const next = await window.hawaldar.getLegal();
+				if (cancelled) {
+					return;
+				}
 				setLegal(next);
+				if (next.accepted) {
+					setBootStatusKey('boot.settings');
+					await window.hawaldar.getSettings().catch(() => null);
+					if (cancelled) {
+						return;
+					}
+					setBootStatusKey('boot.knowledge');
+					await Promise.all([
+						window.hawaldar.knowledgeStatus().catch(() => null),
+						window.hawaldar.getStatus().catch(() => null),
+					]);
+				}
+			} catch (err) {
+				if (!cancelled) {
+					setLegalError(err instanceof Error ? err.message : String(err));
+				}
+			} finally {
+				if (!cancelled) {
+					setBooting(false);
+				}
 			}
-		}).catch((err) => {
-			if (!cancelled) {
-				setLegalError(err instanceof Error ? err.message : String(err));
-			}
-		});
+		})();
 		return () => {
 			cancelled = true;
 		};
@@ -534,6 +561,11 @@ function AppMain() {
 		showWorkspace();
 	};
 
+	const onHome = () => {
+		workspace.focusHome();
+		showWorkspace();
+	};
+
 	const onDeleteThread = async (id: string) => {
 		await window.hawaldar.deleteThread(id);
 		workspace.closeByRef('chat', id);
@@ -576,6 +608,16 @@ function AppMain() {
 		showWorkspace();
 	};
 
+	const onOpenReports = () => {
+		workspace.openReports();
+		showWorkspace();
+	};
+
+	const onOpenReport = (id: string, title: string) => {
+		workspace.openReport(id, title);
+		showWorkspace();
+	};
+
 	const onCreateTask = () => {
 		workspace.openTasks();
 		showWorkspace();
@@ -601,7 +643,11 @@ function AppMain() {
 	const sidebarView: View = view === 'settings' && settingsCategory === 'tools' ? 'tools' : view;
 	const activeTab = workspace.activeTab;
 	const activeTabKey = activeTab?.key;
-	const activeSessionId = activeTab && isBoundChat(activeTab) ? activeTab.refId : undefined;
+	const activeSessionId = activeTab && isBoundChat(activeTab)
+		? activeTab.refId
+		: (activeTab?.kind === 'chat'
+			? undefined
+			: [...workspace.tabs].reverse().find(isBoundChat)?.refId);
 	const activeNoteId = activeTab?.kind === 'note' ? activeTab.refId : undefined;
 	const activeTaskId = activeTab?.kind === 'task' ? activeTab.refId : undefined;
 
@@ -667,23 +713,42 @@ function AppMain() {
 			<button
 				type="button"
 				className="icon-tool"
-				title="Runtime"
-				aria-label="Runtime"
+				title={t('nav.runtime')}
+				aria-label={t('nav.runtime')}
 				onClick={() => openView('podman')}
 			>
 				<ContainerIcon />
 			</button>
+			<ThemeToggle />
 			<button
 				type="button"
 				className="icon-tool"
-				title="Settings"
-				aria-label="Settings"
+				title={t('nav.settings')}
+				aria-label={t('nav.settings')}
 				onClick={() => openView('settings')}
 			>
 				<GearIcon />
 			</button>
 		</>
 	);
+
+	if (booting) {
+		return (
+			<div className="app">
+				<div className="app-titlebar">
+					<div className="product">
+						<BrandMark size={24} className="brand-mark" />
+						Hawaldar
+						<span className="product-meta">authorized recon</span>
+					</div>
+				</div>
+				<BootScreen status={t(bootStatusKey)} />
+				{quitPhase !== 'hidden' && (
+					<QuitConfirm phase={quitPhase} onCancel={onQuitCancel} onConfirm={onQuitConfirm} />
+				)}
+			</div>
+		);
+	}
 
 	if (!legal || !legal.accepted) {
 		return (
@@ -741,6 +806,7 @@ function AppMain() {
 					onOpenView={openView}
 					onSelectThread={onSelectThread}
 					onNewThread={onNewThread}
+					onHome={onHome}
 					onDeleteThread={(id) => void onDeleteThread(id)}
 					onRenameThread={(id, title) => void onRenameThread(id, title)}
 					onPinThread={async (id, pinned) => {
@@ -754,6 +820,7 @@ function AppMain() {
 				graphActive={view === 'chat' && activeTab?.kind === 'graph'}
 				tasksActive={view === 'chat' && activeTab?.kind === 'tasks'}
 				findingsActive={view === 'chat' && activeTab?.kind === 'findings'}
+				homeActive={view === 'chat' && Boolean(activeTab?.welcome)}
 				findingsCount={findingsCount}
 			/>
 
@@ -814,7 +881,16 @@ function AppMain() {
 											<GraphTab />
 										)}
 										{tab.kind === 'findings' && (
-											<FindingsPage />
+											<FindingsPage
+												activeSessionId={activeSessionId}
+												onOpenReport={onOpenReport}
+											/>
+										)}
+										{tab.kind === 'reports' && (
+											<ReportsPage onOpenReport={onOpenReport} />
+										)}
+										{tab.kind === 'report' && (
+											<ReportViewer reportId={tab.refId} />
 										)}
 											{tab.kind === 'tasks' && (
 												<TasksPage
@@ -885,7 +961,10 @@ function AppMain() {
 						onCreateNote={onCreateNote}
 						onNoteRemoved={(id) => workspace.closeByRef('note', id)}
 						onOpenFindings={onOpenFindings}
+						onOpenReports={onOpenReports}
+						onOpenReport={onOpenReport}
 						findingsCount={findingsCount}
+						activeSessionId={activeSessionId}
 					/>
 				)}
 			</div>

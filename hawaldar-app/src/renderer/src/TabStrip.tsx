@@ -1,6 +1,7 @@
 import type { MouseEvent, ReactNode } from 'react';
-import { ChatIcon, FindingsIcon, GraphIcon, NotesIcon, TasksIcon } from './navIcons';
+import { ChatIcon, CloseIcon, FindingsIcon, GraphIcon, NotesIcon, ReportsIcon, TasksIcon } from './navIcons';
 import type { WorkspaceTab } from './workspaceTabs';
+import { useI18n } from './i18n';
 
 interface Props {
 	tabs: WorkspaceTab[];
@@ -15,21 +16,25 @@ interface Props {
 
 function TabGlyph({ tab }: { tab: WorkspaceTab }) {
 	if (tab.kind === 'note') {
-		return <NotesIcon size={12} />;
+		return <NotesIcon size={18} />;
 	}
 	if (tab.kind === 'task' || tab.kind === 'tasks') {
-		return <TasksIcon size={12} />;
+		return <TasksIcon size={18} />;
 	}
 	if (tab.kind === 'graph') {
-		return <GraphIcon size={12} />;
+		return <GraphIcon size={18} />;
 	}
 	if (tab.kind === 'findings') {
-		return <FindingsIcon size={12} />;
+		return <FindingsIcon size={18} />;
 	}
-	return <ChatIcon size={12} />;
+	if (tab.kind === 'reports' || tab.kind === 'report') {
+		return <ReportsIcon size={18} />;
+	}
+	return <ChatIcon size={18} />;
 }
 
 export default function TabStrip({ tabs, activeId, activeKey, dirtyIds, actions, onFocus, onClose }: Props) {
+	const { t } = useI18n();
 	const onAuxClick = (event: MouseEvent<HTMLButtonElement>, id: string) => {
 		if (event.button === 1) {
 			event.preventDefault();
@@ -63,14 +68,14 @@ export default function TabStrip({ tabs, activeId, activeKey, dirtyIds, actions,
 							<button
 								type="button"
 								className="chrome-tab-close"
-								title="Close tab"
-								aria-label={`Close ${tab.title}`}
+								title={t('chrome.closeTab')}
+								aria-label={`${t('chrome.closeTab')}: ${tab.title}`}
 								onClick={(event) => {
 									event.stopPropagation();
 									onClose(tab.id);
 								}}
 							>
-								×
+								<CloseIcon size={16} />
 							</button>
 						</div>
 					);

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CatalogItem, NoteSummaryDTO, TaskDTO } from '../../preload/api';
+import type { CatalogItem, NoteSummaryDTO, ReportDTO, TaskDTO } from '../../preload/api';
 
-export type WorkspaceTabKind = 'chat' | 'note' | 'task' | 'tasks' | 'graph' | 'findings';
+export type WorkspaceTabKind = 'chat' | 'note' | 'task' | 'tasks' | 'graph' | 'findings' | 'reports' | 'report';
+
+const TAB_KINDS = new Set<WorkspaceTabKind>(['chat', 'note', 'task', 'tasks', 'graph', 'findings', 'reports', 'report']);
+
+function isTabKind(value: unknown): value is WorkspaceTabKind {
+	return typeof value === 'string' && TAB_KINDS.has(value as WorkspaceTabKind);
+}
 
 export interface WorkspaceTab {
 	/** Stable React key; survives session bind so Chat does not remount. */
@@ -78,9 +84,7 @@ export function readPersistedWorkspace(): PersistedWorkspace | null {
 			return null;
 		}
 		const tabs = parsed.tabs.filter((tab): tab is PersistedTab => (
-			tab
-			&& (tab.kind === 'chat' || tab.kind === 'note' || tab.kind === 'task' || tab.kind === 'tasks' || tab.kind === 'graph' || tab.kind === 'findings')
-			&& typeof tab.refId === 'string'
+			Boolean(tab) && isTabKind(tab.kind) && typeof tab.refId === 'string'
 		));
 		return { tabs, activeId: typeof parsed.activeId === 'string' ? parsed.activeId : '' };
 	} catch {
@@ -111,14 +115,36 @@ export function hydrateWorkspace(
 		threads: CatalogItem[];
 		notes: NoteSummaryDTO[];
 		tasks: TaskDTO[];
+		reports: ReportDTO[];
 	},
 ): { tabs: WorkspaceTab[]; activeId: string } {
-	const threads = new Map(catalogs.threads.map((item) => [item.id, item]));
-	const notes = new Map(catalogs.notes.map((item) => [item.id, item]));
-	const tasks = new Map(catalogs.tasks.map((item) => [item.id, item]));
+	try {
+		return hydrateWorkspaceUnsafe(persisted, catalogs);
+	} catch {
+		const fresh = welcomeTab();
+		return { tabs: [fresh], activeId: fresh.id };
+	}
+}
+
+function hydrateWorkspaceUnsafe(
+	persisted: PersistedWorkspace | null,
+	catalogs: {
+		threads: CatalogItem[];
+		notes: NoteSummaryDTO[];
+		tasks: TaskDTO[];
+		reports: ReportDTO[];
+	},
+): { tabs: WorkspaceTab[]; activeId: string } {
+	const threads = new Map((catalogs.threads ?? []).map((item) => [item.id, item]));
+	const notes = new Map((catalogs.notes ?? []).map((item) => [item.id, item]));
+	const tasks = new Map((catalogs.tasks ?? []).map((item) => [item.id, item]));
+	const reports = new Map((catalogs.reports ?? []).map((item) => [item.id, item]));
 	const raw: WorkspaceTab[] = [];
 
 	for (const row of persisted?.tabs ?? []) {
+		if (!isTabKind(row.kind) || typeof row.refId !== 'string') {
+			continue;
+		}
 		if (row.kind === 'chat') {
 			if (row.welcome || !row.refId || isDraftRef(row.refId)) {
 				const refId = row.refId && row.refId !== 'welcome' ? row.refId : newDraftRefId();
@@ -175,6 +201,30 @@ export function hydrateWorkspace(
 			});
 			continue;
 		}
+		if (row.kind === 'reports') {
+			raw.push({
+				key: row.key || newTabKey(),
+				id: makeTabId('reports', 'gallery'),
+				kind: 'reports',
+				refId: 'gallery',
+				title: 'Reports',
+			});
+			continue;
+		}
+		if (row.kind === 'report') {
+			const report = reports.get(row.refId);
+			if (!report?.id) {
+				continue;
+			}
+			raw.push({
+				key: row.key || newTabKey(),
+				id: makeTabId('report', report.id),
+				kind: 'report',
+				refId: report.id,
+				title: report.title || 'Report',
+			});
+			continue;
+		}
 		if (row.kind === 'note') {
 			const note = notes.get(row.refId);
 			if (!note) {
@@ -187,6 +237,9 @@ export function hydrateWorkspace(
 				refId: note.id,
 				title: note.title,
 			});
+			continue;
+		}
+		if (row.kind !== 'task') {
 			continue;
 		}
 		const task = tasks.get(row.refId);
@@ -252,15 +305,21 @@ export function useWorkspaceTabs() {
 				if (!api) {
 					return;
 				}
-				const [threads, notes, tasks] = await Promise.all([
+				const [threads, notes, tasks, reportRows] = await Promise.all([
 					api.listThreads(),
 					api.listNotes(),
 					api.listTasks(),
+					api.listReports().catch(() => [] as ReportDTO[]),
 				]);
 				if (cancelled) {
 					return;
 				}
-				const next = hydrateWorkspace(readPersistedWorkspace(), { threads, notes, tasks });
+				const next = hydrateWorkspace(readPersistedWorkspace(), {
+					threads,
+					notes,
+					tasks,
+					reports: reportRows,
+				});
 				setOpenTabs(next.tabs);
 				setActiveId(next.activeId);
 			} catch {
@@ -348,6 +407,14 @@ export function useWorkspaceTabs() {
 		return openTab('findings', 'engagement', 'Findings');
 	}, [openTab]);
 
+	const openReports = useCallback(() => {
+		return openTab('reports', 'gallery', 'Reports');
+	}, [openTab]);
+
+	const openReport = useCallback((refId: string, title: string) => {
+		return openTab('report', refId, title);
+	}, [openTab]);
+
 	const openDraft = useCallback((kind: 'note' | 'task') => {
 		const refId = newDraftRefId();
 		const id = makeTabId(kind, refId);
@@ -401,6 +468,18 @@ export function useWorkspaceTabs() {
 	}, []);
 
 	const openNewChat = useCallback(() => {
+		const tab = welcomeTab();
+		setOpenTabs((prev) => [...prev, tab]);
+		setActiveId(tab.id);
+		return tab.id;
+	}, []);
+
+	const focusHome = useCallback(() => {
+		const existing = tabsRef.current.find((tab) => tab.kind === 'chat' && tab.welcome);
+		if (existing) {
+			setActiveId(existing.id);
+			return existing.id;
+		}
 		const tab = welcomeTab();
 		setOpenTabs((prev) => [...prev, tab]);
 		setActiveId(tab.id);
@@ -496,10 +575,13 @@ export function useWorkspaceTabs() {
 		openTasks,
 		openGraph,
 		openFindings,
+		openReports,
+		openReport,
 		openDraftNote,
 		openDraftTask,
 		rebindDoc,
 		openNewChat,
+		focusHome,
 		closeTab,
 		closeByRef,
 		bindChatSession,

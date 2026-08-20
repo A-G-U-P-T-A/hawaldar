@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing git tag to attach artifacts to (does not create a new version)
         type: string
-        default: v0.1.0-beta.1
+        default: v0.1.0-beta.2
 
 permissions:
   contents: write

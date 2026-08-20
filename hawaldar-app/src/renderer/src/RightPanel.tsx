@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FindingDTO, NoteSummaryDTO } from '../../preload/api';
-import { FindingsIcon, NotesIcon } from './navIcons';
+import type { CatalogItem, FindingDTO, NoteSummaryDTO, ReportDTO } from '../../preload/api';
+import { FindingsIcon, NotesIcon, ReportsIcon, AddIcon, OpenInNewIcon, DeleteIcon } from './navIcons';
 import PaneSash from './PaneSash';
 import { clampGrow, MAIN_PANE_MIN, useDragResize, usePersistedPanelSize } from './paneResize';
 import { fuzzyMatch } from './sessionGroups';
 import { restoreRedactedAddresses } from './keepAddresses';
+import Dropdown from './Dropdown';
+import { ALL_CHATS, THIS_CHAT, chatIdSlice, isUnassignedSession, threadLabel, toFindingsListFilter, useFindingsChatScope } from './findingsScope';
+import { useI18n } from './i18n';
 
 const COLLAPSED_KEY = 'hawaldar.rightPanelCollapsed';
 const PANE_KEY = 'hawaldar.rightPanelPane';
 
-type RailPane = 'notes' | 'findings';
+type RailPane = 'notes' | 'findings' | 'reports';
 
 function readCollapsed(): boolean {
 	try {
@@ -29,7 +32,11 @@ function writeCollapsed(value: boolean) {
 
 function readPane(): RailPane {
 	try {
-		return window.localStorage.getItem(PANE_KEY) === 'findings' ? 'findings' : 'notes';
+		const raw = window.localStorage.getItem(PANE_KEY);
+		if (raw === 'findings' || raw === 'reports' || raw === 'notes') {
+			return raw;
+		}
+		return 'notes';
 	} catch {
 		return 'notes';
 	}
@@ -54,7 +61,10 @@ interface Props {
 	onCreateNote: () => void;
 	onNoteRemoved: (id: string) => void;
 	onOpenFindings?: () => void;
+	onOpenReports?: () => void;
+	onOpenReport?: (id: string, title: string) => void;
 	findingsCount?: number;
+	activeSessionId?: string;
 }
 
 export default function RightPanel({
@@ -64,7 +74,10 @@ export default function RightPanel({
 	onCreateNote,
 	onNoteRemoved,
 	onOpenFindings,
+	onOpenReports,
+	onOpenReport,
 	findingsCount = 0,
+	activeSessionId,
 }: Props) {
 	const [collapsed, setCollapsed] = useState(readCollapsed);
 	const [pane, setPane] = useState<RailPane>(readPane);
@@ -135,7 +148,7 @@ export default function RightPanel({
 			<div className="right-rail-clip">
 				<div className="right-rail-inner" inert={collapsed}>
 					<div className="right-rail-head">
-						<div className="right-rail-tabs" role="tablist" aria-label="Notes and findings">
+						<div className="right-rail-tabs" role="tablist" aria-label="Notes, findings, and reports">
 							<button
 								type="button"
 								role="tab"
@@ -146,7 +159,7 @@ export default function RightPanel({
 									writePane('notes');
 								}}
 							>
-								<NotesIcon size={14} />
+								<NotesIcon size={18} />
 								<span>Notes</span>
 							</button>
 							<button
@@ -159,13 +172,26 @@ export default function RightPanel({
 									writePane('findings');
 								}}
 							>
-								<FindingsIcon size={14} />
+								<FindingsIcon size={18} />
 								<span>Findings</span>
 								{findingsCount > 0 && (
 									<span className="rail-badge" aria-hidden="true">
 										{findingsCount > 99 ? '99+' : findingsCount}
 									</span>
 								)}
+							</button>
+							<button
+								type="button"
+								role="tab"
+								className={`right-rail-tab${pane === 'reports' ? ' active' : ''}`}
+								aria-selected={pane === 'reports'}
+								onClick={() => {
+									setPane('reports');
+									writePane('reports');
+								}}
+							>
+								<ReportsIcon size={18} />
+								<span>Reports</span>
 							</button>
 						</div>
 						{pane === 'notes' ? (
@@ -176,9 +202,9 @@ export default function RightPanel({
 								aria-label="New note"
 								onClick={onCreateNote}
 							>
-								+
+								<AddIcon />
 							</button>
-						) : (
+						) : pane === 'findings' ? (
 							<button
 								type="button"
 								className="icon-btn"
@@ -186,7 +212,17 @@ export default function RightPanel({
 								aria-label="Open findings"
 								onClick={() => onOpenFindings?.()}
 							>
-								↗
+								<OpenInNewIcon />
+							</button>
+						) : (
+							<button
+								type="button"
+								className="icon-btn"
+								title="Open reports"
+								aria-label="Open reports"
+								onClick={() => onOpenReports?.()}
+							>
+								<OpenInNewIcon />
 							</button>
 						)}
 					</div>
@@ -197,8 +233,16 @@ export default function RightPanel({
 							onOpen={onOpenNote}
 							onRemoved={onNoteRemoved}
 						/>
+					) : pane === 'findings' ? (
+						<FindingsPane
+							activeSessionId={activeSessionId}
+							onOpenPage={() => onOpenFindings?.()}
+						/>
 					) : (
-						<FindingsPane onOpenPage={() => onOpenFindings?.()} />
+						<ReportsPane
+							onOpenGallery={() => onOpenReports?.()}
+							onOpenReport={(id, title) => onOpenReport?.(id, title)}
+						/>
 					)}
 				</div>
 			</div>
@@ -280,7 +324,7 @@ function NotesPane({
 									void remove(row.id);
 								}}
 							>
-								×
+								<DeleteIcon />
 							</button>
 						</span>
 					</div>
@@ -290,14 +334,106 @@ function NotesPane({
 	);
 }
 
-function FindingsPane({ onOpenPage }: { onOpenPage: () => void }) {
+function FindingsPane({
+	onOpenPage,
+	activeSessionId,
+}: {
+	onOpenPage: () => void;
+	activeSessionId?: string;
+}) {
+	const { t } = useI18n();
 	const [rows, setRows] = useState<FindingDTO[]>([]);
+	const [threads, setThreads] = useState<CatalogItem[]>([]);
+	const [chatFilter, setChatFilter] = useFindingsChatScope(activeSessionId);
+	const [targetQuery, setTargetQuery] = useState('');
+	const [error, setError] = useState('');
+
+	const listFilter = useMemo(
+		() => toFindingsListFilter(chatFilter, activeSessionId, targetQuery.trim() || undefined),
+		[chatFilter, activeSessionId, targetQuery],
+	);
+
+	const refresh = useCallback(async () => {
+		try {
+			const [findings, chats] = await Promise.all([
+				window.hawaldar.listFindings(listFilter),
+				window.hawaldar.listThreads().catch(() => [] as CatalogItem[]),
+			]);
+			setRows(findings);
+			setThreads(chats);
+			setError('');
+		} catch (err) {
+			setError(errText(err));
+		}
+	}, [listFilter]);
+
+	useEffect(() => {
+		void refresh();
+		const off = window.hawaldar.onFindingsChanged(() => void refresh());
+		return () => off();
+	}, [refresh]);
+
+	const chatOptions = [
+		{ value: THIS_CHAT, label: t('findings.thisChat') },
+		{ value: ALL_CHATS, label: t('findings.allChats') },
+		...threads.map((item) => ({ value: item.id, label: threadLabel(item) })),
+	];
+
+	return (
+		<div className="right-pane">
+			<div className="right-search findings-rail-scope">
+				<Dropdown
+					compact
+					value={chatFilter}
+					options={chatOptions}
+					onChange={setChatFilter}
+					ariaLabel={t('findings.filterChat')}
+				/>
+				<input
+					type="search"
+					value={targetQuery}
+					onChange={(e) => setTargetQuery(e.target.value)}
+					placeholder={t('findings.filterTarget')}
+					aria-label={t('findings.filterTarget')}
+				/>
+			</div>
+			{error && <div className="right-pane-status is-error">{error}</div>}
+			<div className="right-list">
+				{rows.length === 0 && (
+					<div className="empty-rail">{t('findings.empty')}</div>
+				)}
+				{rows.map((row) => (
+					<div key={row.id} className="right-row">
+						<button type="button" className="right-row-main stacked" onClick={onOpenPage}>
+							<span className="title">{restoreRedactedAddresses(row.title)}</span>
+							<span className="meta">
+								{row.status} · {row.vulnClass}
+								{row.target ? ` · ${restoreRedactedAddresses(row.target)}` : ''}
+								{` · ${isUnassignedSession(row.sessionId) ? t('findings.unassignedChat') : chatIdSlice(row.sessionId)}`}
+							</span>
+						</button>
+					</div>
+				))}
+			</div>
+		</div>
+	);
+}
+
+function ReportsPane({
+	onOpenGallery,
+	onOpenReport,
+}: {
+	onOpenGallery: () => void;
+	onOpenReport: (id: string, title: string) => void;
+}) {
+	const { t } = useI18n();
+	const [rows, setRows] = useState<ReportDTO[]>([]);
 	const [query, setQuery] = useState('');
 	const [error, setError] = useState('');
 
 	const refresh = useCallback(async () => {
 		try {
-			setRows(await window.hawaldar.listFindings());
+			setRows(await window.hawaldar.listReports());
 			setError('');
 		} catch (err) {
 			setError(errText(err));
@@ -306,12 +442,12 @@ function FindingsPane({ onOpenPage }: { onOpenPage: () => void }) {
 
 	useEffect(() => {
 		void refresh();
-		const off = window.hawaldar.onFindingsChanged(() => void refresh());
+		const off = window.hawaldar.onReportsChanged(() => void refresh());
 		return () => off();
 	}, [refresh]);
 
 	const visible = useMemo(
-		() => rows.filter((row) => fuzzyMatch(query, `${row.title} ${row.vulnClass} ${row.status} ${row.target}`)),
+		() => rows.filter((row) => fuzzyMatch(query, `${row.title} ${row.target} ${row.chatTitle} ${row.sessionId} ${row.id}`)),
 		[query, rows],
 	);
 
@@ -322,26 +458,39 @@ function FindingsPane({ onOpenPage }: { onOpenPage: () => void }) {
 					type="search"
 					value={query}
 					onChange={(e) => setQuery(e.target.value)}
-					placeholder="Search findings"
-					aria-label="Search findings"
+					placeholder={t('reports.search')}
+					aria-label={t('reports.search')}
 				/>
 			</div>
 			{error && <div className="right-pane-status is-error">{error}</div>}
 			<div className="right-list">
 				{rows.length === 0 && (
-					<div className="empty-rail">No findings yet.</div>
+					<div className="empty-rail">{t('reports.empty')}</div>
 				)}
 				{rows.length > 0 && visible.length === 0 && (
-					<div className="empty-rail">No matching findings.</div>
+					<div className="empty-rail">{t('reports.noMatch')}</div>
 				)}
 				{visible.map((row) => (
 					<div key={row.id} className="right-row">
-						<button type="button" className="right-row-main stacked" onClick={onOpenPage}>
-							<span className="title">{restoreRedactedAddresses(row.title)}</span>
-							<span className="meta">{row.status} · {row.vulnClass}</span>
+						<button
+							type="button"
+							className="right-row-main stacked"
+							onClick={() => onOpenReport(row.id, row.title)}
+						>
+							<span className="title">{row.title}</span>
+							<span className="meta">
+								{restoreRedactedAddresses(row.target) || t('reports.noTarget')}
+								{row.chatTitle ? ` · ${row.chatTitle}` : ''}
+								{row.sessionId ? ` · ${chatIdSlice(row.sessionId)}` : ''}
+							</span>
 						</button>
 					</div>
 				))}
+				{rows.length > 0 && (
+					<button type="button" className="right-row-main" onClick={onOpenGallery}>
+						<span className="title">{t('reports.openGallery')}</span>
+					</button>
+				)}
 			</div>
 		</div>
 	);
