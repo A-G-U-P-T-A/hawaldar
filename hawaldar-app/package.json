@@ -136,7 +136,7 @@
     "@types/react-dom": "^19.0.0",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^43.4.0",
+    "electron": "^43.5.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "react": "^19.0.0",
